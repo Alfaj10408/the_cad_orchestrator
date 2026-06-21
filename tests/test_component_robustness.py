@@ -26,8 +26,8 @@ def test_build_claude_argv_uses_passed_tools_and_turns():
 def test_component_config_defaults():
     assert cfg.CLAUDE_CODE_COMPONENT_TOOLS == "Read,Write,Edit"
     assert "Bash" not in cfg.CLAUDE_CODE_COMPONENT_TOOLS
-    assert cfg.CLAUDE_CODE_COMPONENT_MAX_TURNS == 8
-    assert cfg.CLAUDE_CODE_COMPONENT_NEAR_CAP == 6
+    assert cfg.CLAUDE_CODE_COMPONENT_MAX_TURNS == 12
+    assert cfg.CLAUDE_CODE_COMPONENT_NEAR_CAP == 8
     # globals unchanged
     assert cfg.CLAUDE_CODE_TOOLS == "Read,Write,Edit,Bash"
     assert cfg.CLAUDE_CODE_MAX_TURNS == 15
@@ -121,7 +121,7 @@ def test_component_loop_uses_component_tools_and_writes_metrics(monkeypatch):
     monkeypatch.setattr(claude_code_adapter, "run_claude", fake_run_claude)
     asyncio.run(cg.run(pid, job.job_id))
     assert seen["tools"] == {"Read,Write,Edit"}
-    assert seen["max_turns"] == {8}
+    assert seen["max_turns"] == {12}
     metrics = json.loads((paths.project_dir(pid) / "reports" / "component_metrics.json").read_text())
     assert metrics["totals"]["components"] >= 1
     assert all("turns_total" in c for c in metrics["components"])
