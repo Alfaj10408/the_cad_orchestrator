@@ -31,6 +31,21 @@ _running: dict[str, asyncio.subprocess.Process] = {}
 _cancelled: set[str] = set()
 
 
+def classify_failure(*, is_error: bool, result_text, subtype, num_turns, max_turns):
+    """Classify a Claude run failure.
+
+    Returns None (ok or not classifiable), "quota", "turns", or "cad".
+    """
+    if not is_error:
+        return None
+    t = (result_text or "").lower()
+    if "session limit" in t or "hit your" in t or "usage limit" in t:
+        return "quota"
+    if subtype == "error_max_turns" or (num_turns is not None and num_turns >= max_turns):
+        return "turns"
+    return "cad"
+
+
 def _sem() -> asyncio.Semaphore:
     global _semaphore
     if _semaphore is None:
@@ -257,6 +272,8 @@ async def run_claude(
     result_text: Optional[str] = None
     is_error = False
     total_bytes = 0
+    result_subtype: Optional[str] = None
+    result_num_turns: Optional[int] = None
 
     if job_id in _cancelled:
         _cancelled.discard(job_id)
@@ -264,7 +281,7 @@ async def run_claude(
     async with _sem():
         if job_id in _cancelled:
             return {"ok": False, "session_id": None, "result_text": None,
-                    "exit_code": None, "error": "cancelled before start"}
+                    "exit_code": None, "failure_class": None, "error": "cancelled before start"}
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -279,13 +296,13 @@ async def run_claude(
             )
         except FileNotFoundError:
             return {"ok": False, "session_id": None, "result_text": None,
-                    "exit_code": None, "error": "claude binary not found"}
+                    "exit_code": None, "failure_class": None, "error": "claude binary not found"}
 
         _running[job_id] = proc
         stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, raw_log))
 
         async def _read_stream() -> None:
-            nonlocal session_id, result_text, is_error, total_bytes
+            nonlocal session_id, result_text, is_error, total_bytes, result_subtype, result_num_turns
             while True:
                 try:
                     line = await proc.stdout.readline()
@@ -312,6 +329,8 @@ async def run_claude(
                 if obj.get("type") == "result":
                     is_error = bool(obj.get("is_error"))
                     result_text = obj.get("result")
+                    result_subtype = obj.get("subtype")
+                    result_num_turns = obj.get("num_turns")
                     session_id = obj.get("session_id") or session_id
                 norm = _normalize(obj)
                 if norm:
@@ -330,7 +349,7 @@ async def run_claude(
                 pass
             await proc.wait()
             return {"ok": False, "session_id": session_id, "result_text": None,
-                    "exit_code": proc.returncode, "error": "claude timeout"}
+                    "exit_code": proc.returncode, "failure_class": "cad", "error": "claude timeout"}
         finally:
             stderr_task.cancel()
             _running.pop(job_id, None)
@@ -338,15 +357,20 @@ async def run_claude(
         if job_id in _cancelled:
             _cancelled.discard(job_id)
             return {"ok": False, "session_id": session_id, "result_text": result_text,
-                    "exit_code": proc.returncode, "error": "cancelled"}
+                    "exit_code": proc.returncode, "failure_class": None, "error": "cancelled"}
 
         exit_code = proc.returncode
+        max_turns_used = max_turns or config.CLAUDE_CODE_MAX_TURNS
+        failure_class = classify_failure(
+            is_error=is_error, result_text=result_text, subtype=result_subtype,
+            num_turns=result_num_turns, max_turns=max_turns_used)
         ok = exit_code == 0 and not is_error
         return {
             "ok": ok,
             "session_id": session_id,
             "result_text": result_text,
             "exit_code": exit_code,
+            "failure_class": failure_class,
             "error": None if ok else (
                 f"claude exit {exit_code}, is_error={is_error}"),
         }
