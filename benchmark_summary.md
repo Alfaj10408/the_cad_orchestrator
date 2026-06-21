@@ -96,3 +96,57 @@ These cannot be built as independent positive-volume solids, so they error in bu
 - **Operational:** long multi-object batches exhaust the Claude session quota (~9 substantive generations before the cap here), and quota errors are not distinguished from CAD failures.
 
 *No remediation implemented — evaluation only, per scope.*
+
+---
+
+# Post-refactor (2026-06-21) — Deterministic Assembly
+
+After the deterministic-assembly refactor (single-shot + monolithic-assembly Claude calls replaced by a Claude-free assembly that composes validated component STEP files; failure classes FAILED_CAD/QUOTA/TURNS; `reports/assembly_graph.json` artifact). Re-ran a 4-object mini-benchmark through the real pipeline.
+
+## 1. Mini-benchmark results (4 objects)
+
+| Object | Path | Status | Comp pass | Repairs | Assembly | Gen time | Solids | Faces | Edges | BBox (mm) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| calibration block | 1-node | ✅ COMPLETED | 1/1 | 1 | ✅ | 68.1s | 1 | 30 | 72 | 50×50×10 |
+| mounting plate | 1-node | ✅ COMPLETED | 1/1 | 1 | ✅ | 80.9s | 1 | 22 | 52 | 120×80×6 |
+| quadcopter drone | hierarchical | ✅ COMPLETED | 8/8 | 2 | ✅ | 1949.2s | 17 | 405 | 1042 | 259×189×102 |
+| gear housing | hierarchical | ✅ COMPLETED | 8/8 | 2 | ✅ | 2225.2s | 8 | 495 | 1372 | 105.7×106.5×24 |
+
+**4/4 PASS.** Assembly via deterministic STEP composition (OCC compound builder), zero Claude calls in the assembly stage. `assembly_graph.json` persisted for each.
+
+## 2. Before vs after (same 4 objects)
+
+| Object | Before (2026-06-19) | After (2026-06-21) |
+|---|---|---|
+| calibration block | ❌ FAILED — `error_max_turns` (single-shot), 0 geometry | ✅ COMPLETED — 1 solid, 30 faces |
+| mounting plate | ❌ FAILED — `error_max_turns` (single-shot), 0 geometry | ✅ COMPLETED — 1 solid, 22 faces |
+| quadcopter drone | ❌ FAILED — ASSEMBLY_VALIDATION (`claude exit 1, is_error` = max_turns on monolithic assembly), 8/8 components but no assembly | ✅ COMPLETED — 17 solids, 405 faces |
+| gear housing | ✅ COMPLETED — 8 solids, 1808 faces (Claude monolithic assembly) | ✅ COMPLETED — 8 solids, 495 faces (deterministic STEP composition) |
+
+Note: gear-housing face count dropped (1808 → 495) because the assembly is now a faithful composition of the 8 *validated* component STEPs rather than a Claude-regenerated monolith. Still 8 solids, non-primitive, valid.
+
+## 3. Pass-rate change
+
+| Class | Before | After |
+|---|---|---|
+| Simple (calibration block, mounting plate) | 0/2 (0%) | **2/2 (100%)** |
+| Hierarchical (drone, gear housing) | 1/2 (50%) | **2/2 (100%)** |
+| Overall mini-benchmark | 1/4 (25%) | **4/4 (100%)** |
+
+## 4. Did deterministic assembly eliminate the max_turns assembly failures?
+
+**Yes.** Both monolithic call sites are gone:
+- **Single-shot** simple parts now route through a 1-node graph → one small component call + deterministic 1-part export. No whole-object monolithic call → no `error_max_turns` (calibration block, mounting plate now pass).
+- **Whole-assembly** generation is now deterministic Python (import_step + OCC compound). Drone previously died at the assembly Claude call (`error_max_turns`); now its assembly is Claude-free and completes (17 solids). Zero `error_max_turns` / `FAILED_TURNS` across all 4 runs.
+
+Validated independently: a 16-instance deterministic drone assembly ran clean (16 solids, no segfault, zero Claude calls); 28 unit tests pass.
+
+## 5. Remaining failure modes after the refactor
+
+1. **Component generation is still the only Claude-bound stage** — each component call must finish within `max_turns=15`. The earlier benchmark showed individual components can still hit `error_max_turns` (controller_deck-class issues). Now isolated to single components (recoverable via repair), no longer fatal to the whole object.
+2. **Claude session/quota** still gates long batches. Now classified as `FAILED_QUOTA` with abort-fast (no 24-attempt spin), but a quota-exhausted run still fails. Operational, not a code defect.
+3. **Pseudo-component decomposition** (failure mode #3, unchanged — out of scope): generic objects still slugify features into "components" (e.g. `keyway_in_the_bore`); a non-buildable pseudo-component drops an object to N-1/N and blocks assembly. Only `quadcopter drone` has a real domain manifest.
+4. **Generic placement is structural, not physical** — non-domain objects get a grid layout (non-overlapping, valid, passes anti-primitive gate) but not a physically meaningful arrangement. Domain rules exist only for drone.
+5. **Deterministic assembly composes validated STEPs as-is** — no inter-component boolean fusing/interference resolution; parts are placed, not merged. Acceptable for concept CAD; matters for later manufacturing/URDF stages.
+
+*Refactor scope only: assembly determinism + failure classification. CAD modeling quality, Qwen prompts, decomposition, and frontend unchanged.*
