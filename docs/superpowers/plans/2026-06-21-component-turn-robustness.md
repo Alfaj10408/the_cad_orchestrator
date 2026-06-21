@@ -328,7 +328,7 @@ git commit -m "feat(prompt): Edit-targeted component repair"
 
 **Interfaces — Produces:** `write_metrics(project_id: str, records: list[dict]) -> dict` — writes `reports/component_metrics.json`, returns the full report (with `totals`).
 
-**Exact behavior change:** New reporting helper (mirrors `write_report`). Each record: `name, attempts, repairs, turns_total, turns_per_attempt, failure_class, source_bytes, valid, reason`. Computes `totals`.
+**Exact behavior change:** New reporting helper (mirrors `write_report`). Each record: `name, attempts, repairs, turns_total, turns_per_attempt, duration_seconds, failure_class, source_bytes, valid, reason`. Computes `totals` (including `duration_total_s`).
 
 - [ ] **Step 1: Write the failing test**
 ```python
@@ -340,11 +340,11 @@ def test_write_metrics_schema_and_totals():
     pid = "metrics_t"
     records = [
         {"name": "a", "attempts": 1, "repairs": 0, "turns_total": 4,
-         "turns_per_attempt": [4], "failure_class": None, "source_bytes": 1800,
-         "valid": True, "reason": None},
+         "turns_per_attempt": [4], "duration_seconds": 12.5, "failure_class": None,
+         "source_bytes": 1800, "valid": True, "reason": None},
         {"name": "b", "attempts": 2, "repairs": 1, "turns_total": 9,
-         "turns_per_attempt": [5, 4], "failure_class": None, "source_bytes": 1500,
-         "valid": True, "reason": None},
+         "turns_per_attempt": [5, 4], "duration_seconds": 30.0, "failure_class": None,
+         "source_bytes": 1500, "valid": True, "reason": None},
     ]
     rep = cv.write_metrics(pid, records)
     assert rep["totals"]["components"] == 2
@@ -352,8 +352,10 @@ def test_write_metrics_schema_and_totals():
     assert rep["totals"]["turns_total"] == 13
     assert rep["totals"]["repairs_total"] == 1
     assert round(rep["totals"]["avg_turns_per_component"], 1) == 6.5
+    assert round(rep["totals"]["duration_total_s"], 1) == 42.5
     on_disk = json.loads((paths.project_dir(pid) / "reports" / "component_metrics.json").read_text())
     assert on_disk["components"][0]["name"] == "a"
+    assert on_disk["components"][0]["duration_seconds"] == 12.5
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -369,6 +371,7 @@ def write_metrics(project_id: str, records: list[dict]) -> dict:
     passed = sum(1 for r in records if r.get("valid"))
     turns_total = sum(r.get("turns_total") or 0 for r in records)
     repairs_total = sum(r.get("repairs") or 0 for r in records)
+    duration_total = sum(r.get("duration_seconds") or 0 for r in records)
     n = len(records)
     report = {
         "project_id": project_id,
@@ -379,6 +382,7 @@ def write_metrics(project_id: str, records: list[dict]) -> dict:
             "turns_total": turns_total,
             "repairs_total": repairs_total,
             "avg_turns_per_component": (turns_total / n) if n else 0,
+            "duration_total_s": round(duration_total, 1),
         },
     }
     reports = paths.project_dir(project_id) / "reports"
@@ -459,6 +463,8 @@ def test_component_loop_uses_component_tools_and_writes_metrics(monkeypatch):
     metrics = json.loads((paths.project_dir(pid) / "reports" / "component_metrics.json").read_text())
     assert metrics["totals"]["components"] >= 1
     assert all("turns_total" in c for c in metrics["components"])
+    assert all("duration_seconds" in c for c in metrics["components"])
+    assert "duration_total_s" in metrics["totals"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -486,10 +492,12 @@ Expected: FAIL (`_claude_call` ignores tools; no metrics file).
 ```python
         metric_records: list[dict] = []
 ```
+Add `import time` to the module imports (top of `claude_generation.py`) if not already present.
 Inside the `for comp` loop, before `while True:`, init per-component trackers:
 ```python
             turns_per_attempt: list[int] = []
             last_fc = None
+            comp_start = time.monotonic()
 ```
 Change the call line to pass component tools/turns:
 ```python
@@ -526,7 +534,9 @@ Success path — change:
                             metric_records.append({
                                 "name": comp["name"], "attempts": c_repair + 1,
                                 "repairs": c_repair, "turns_total": sum(turns_per_attempt),
-                                "turns_per_attempt": turns_per_attempt, "failure_class": last_fc,
+                                "turns_per_attempt": turns_per_attempt,
+                                "duration_seconds": round(time.monotonic() - comp_start, 1),
+                                "failure_class": last_fc,
                                 "source_bytes": _src_bytes(comp), "valid": True, "reason": None})
                             break
 ```
@@ -539,7 +549,9 @@ Exhaustion path — change:
                     metric_records.append({
                         "name": comp["name"], "attempts": c_repair,
                         "repairs": c_repair, "turns_total": sum(turns_per_attempt),
-                        "turns_per_attempt": turns_per_attempt, "failure_class": last_fc,
+                        "turns_per_attempt": turns_per_attempt,
+                        "duration_seconds": round(time.monotonic() - comp_start, 1),
+                        "failure_class": last_fc,
                         "source_bytes": _src_bytes(comp), "valid": False, "reason": c_reason})
                     break
 ```
@@ -606,4 +618,4 @@ git commit -m "feat: component calls use Read/Write/Edit + max_turns=8; per-comp
 
 **Spec coverage:** drop Bash for component calls (Tasks 1,2,6) ✓; `max_turns=8` (Tasks 2,6) ✓; preflight one-file/code-first prompt (Task 3) ✓; Edit-targeted repair (Task 4) ✓; per-component metrics → `component_metrics.json` (Tasks 5,6) ✓; near-cap diagnostic (Task 6) ✓; `num_turns` surfaced (Task 1) ✓; separate metrics file, globals unchanged (Global Constraints, Tasks 2,6) ✓; verification: unit / single-component / repair-path / turn-count / 4-object rerun / measured final report (Task 7.1–7.6) ✓; no frontend/assembly/API/Qwen changes (Global Constraints) ✓.
 **Placeholder scan:** none — every code step has full code.
-**Type consistency:** `build_claude_argv(*, prompt, model, max_turns, tools)->list[str]`; `run_claude(..., tools=None)` returns `num_turns`; `_claude_call(prompt, *, tools=None, max_turns=None)`; `write_metrics(project_id, records)->dict`; metric record keys identical across Tasks 5 and 6 (`name, attempts, repairs, turns_total, turns_per_attempt, failure_class, source_bytes, valid, reason`). Consistent.
+**Type consistency:** `build_claude_argv(*, prompt, model, max_turns, tools)->list[str]`; `run_claude(..., tools=None)` returns `num_turns`; `_claude_call(prompt, *, tools=None, max_turns=None)`; `write_metrics(project_id, records)->dict`; metric record keys identical across Tasks 5 and 6 (`name, attempts, repairs, turns_total, turns_per_attempt, duration_seconds, failure_class, source_bytes, valid, reason`); `totals` includes `duration_total_s`. Consistent.
