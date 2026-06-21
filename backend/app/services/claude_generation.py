@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -150,12 +151,13 @@ async def run(project_id: str, job_id: str) -> None:
                      + ", ".join(c["name"] for c in manifest["components"])),
         )
 
-        async def _claude_call(prompt: str) -> tuple[str, dict]:
+        async def _claude_call(prompt: str, *, tools=None, max_turns=None) -> tuple[str, dict]:
             """One Claude call. Returns (status, res); status: ok|fail|cancel.
 
             Also surfaces res['failure_class']: None | 'quota' | 'turns' | 'cad'.
             """
-            res = await claude_code_adapter.run_claude(project_id, job_id, prompt, ch)
+            res = await claude_code_adapter.run_claude(
+                project_id, job_id, prompt, ch, tools=tools, max_turns=max_turns)
             if res.get("error") == "cancelled" or job_id in claude_code_adapter._cancelled:
                 return "cancel", res
             return ("ok" if res["ok"] else "fail"), res
@@ -172,16 +174,41 @@ async def run(project_id: str, job_id: str) -> None:
         if job:
             job.stage = "COMPONENT_GENERATION"; job_service.save_job(job)
         results: list[dict] = []
+        metric_records: list[dict] = []
+
+        def _src_bytes(c) -> int:
+            cp = claude_code_adapter.safe_workspace_path(
+                claude_code_adapter.workspace_dir(project_id), c["source"])
+            try:
+                return len(cp.read_text().encode("utf-8")) if cp and cp.is_file() else 0
+            except Exception:  # noqa: BLE001
+                return 0
+
         for comp in manifest["components"]:
             await ch.publish(SOURCE_QWEN, "planner.delta", stage="components",
                              message=f"Component: {comp['name']} ({comp['role']})")
             c_reason: str | None = None
             c_repair = 0
+            turns_per_attempt: list[int] = []
+            last_fc = None
+            comp_start = time.monotonic()
             while True:
                 cprompt = component_validator.component_prompt(design_spec, comp)
                 if c_reason:
                     cprompt += component_validator.repair_prompt(comp, c_reason)
-                status, res = await _claude_call(cprompt)
+                status, res = await _claude_call(
+                    cprompt,
+                    tools=config.CLAUDE_CODE_COMPONENT_TOOLS,
+                    max_turns=config.CLAUDE_CODE_COMPONENT_MAX_TURNS)
+                nt = res.get("num_turns")
+                if nt is not None:
+                    turns_per_attempt.append(nt)
+                    if nt >= config.CLAUDE_CODE_COMPONENT_NEAR_CAP:
+                        await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
+                                         message=f"Component {comp['name']} near turn cap: "
+                                                 f"{nt}/{config.CLAUDE_CODE_COMPONENT_MAX_TURNS}")
+                if res.get("failure_class"):
+                    last_fc = res["failure_class"]
                 if status == "cancel":
                     await _do_cancel(); return
                 if status == "fail":
@@ -214,7 +241,15 @@ async def run(project_id: str, job_id: str) -> None:
                             await ch.publish(SOURCE_WORKER, "cad.execution.completed",
                                              stage="cad_execution",
                                              message=f"Component {comp['name']} valid {v['facts']}")
-                            comp["status"] = "valid"; results.append(v); break
+                            comp["status"] = "valid"; results.append(v)
+                            metric_records.append({
+                                "name": comp["name"], "attempts": c_repair + 1,
+                                "repairs": c_repair, "turns_total": sum(turns_per_attempt),
+                                "turns_per_attempt": turns_per_attempt,
+                                "duration_seconds": round(time.monotonic() - comp_start, 1),
+                                "failure_class": last_fc,
+                                "source_bytes": _src_bytes(comp), "valid": True, "reason": None})
+                            break
                         c_reason = v["reason"]
                 c_repair += 1
                 await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
@@ -224,10 +259,18 @@ async def run(project_id: str, job_id: str) -> None:
                     comp["status"] = "invalid"
                     results.append({"name": comp["name"], "step": comp["step"],
                                     "valid": False, "reason": c_reason, "facts": None})
+                    metric_records.append({
+                        "name": comp["name"], "attempts": c_repair,
+                        "repairs": c_repair, "turns_total": sum(turns_per_attempt),
+                        "turns_per_attempt": turns_per_attempt,
+                        "duration_seconds": round(time.monotonic() - comp_start, 1),
+                        "failure_class": last_fc,
+                        "source_bytes": _src_bytes(comp), "valid": False, "reason": c_reason})
                     # Attempt all remaining components before failing; break inner loop only.
                     break
 
         report = component_validator.write_report(project_id, results)
+        component_validator.write_metrics(project_id, metric_records)
         await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
                          message=f"Components validated: {report['passed']}/{report['total']}")
         if report["passed"] < report["total"]:

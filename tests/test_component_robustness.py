@@ -79,3 +79,51 @@ def test_write_metrics_schema_and_totals():
     on_disk = json.loads((paths.project_dir(pid) / "reports" / "component_metrics.json").read_text())
     assert on_disk["components"][0]["name"] == "a"
     assert on_disk["components"][0]["duration_seconds"] == 12.5
+
+
+# ---------------------------------------------------------------------------
+# Task-6 integration: component loop wires tools/max_turns + writes metrics
+# ---------------------------------------------------------------------------
+import asyncio
+from app.services import claude_generation as cg, claude_code_adapter, job_service
+
+VALID_COMP = ("from build123d import *\n\n"
+              "def gen_step():\n    return fillet(Box(40,40,28).edges(), 2)\n")
+
+
+def _seed(pid, prompt, dims):
+    paths.ensure_project_skeleton(pid)
+    (paths.project_dir(pid) / "brief.json").write_text(json.dumps({
+        "project_id": pid, "prompt": prompt, "intent": "concept_cad",
+        "parameters": {"dimensions": dims, "units": "mm", "material": "PLA"},
+        "user_answers": {"dimensions": dims}, "ready_to_generate": True,
+        "generation_mode": "qwen_claude_code"}))
+
+
+def test_component_loop_uses_component_tools_and_writes_metrics(monkeypatch):
+    pid = "wire_comp_tools"
+    _seed(pid, "create a 3D gear housing", "100 x 100 x 60 mm")
+    job = job_service.create_job_full(pid, "generation", "CREATED")
+    seen = {"tools": set(), "max_turns": set()}
+    async def fake_run_claude(project_id, job_id, prompt, ch, *, tools=None,
+                              max_turns=None, model=None, timeout=None):
+        seen["tools"].add(tools); seen["max_turns"].add(max_turns)
+        # emulate Claude writing the component source named in the prompt
+        import re
+        m = re.search(r"output/components/(\S+?)/generate\.py", prompt)
+        rel = m.group(0)
+        dst = claude_code_adapter.safe_workspace_path(
+            claude_code_adapter.ensure_workspace(project_id), rel)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(VALID_COMP)
+        return {"ok": True, "failure_class": None, "num_turns": 4,
+                "session_id": "s", "result_text": "done", "exit_code": 0, "error": None}
+    monkeypatch.setattr(claude_code_adapter, "run_claude", fake_run_claude)
+    asyncio.run(cg.run(pid, job.job_id))
+    assert seen["tools"] == {"Read,Write,Edit"}
+    assert seen["max_turns"] == {8}
+    metrics = json.loads((paths.project_dir(pid) / "reports" / "component_metrics.json").read_text())
+    assert metrics["totals"]["components"] >= 1
+    assert all("turns_total" in c for c in metrics["components"])
+    assert all("duration_seconds" in c for c in metrics["components"])
+    assert "duration_total_s" in metrics["totals"]
