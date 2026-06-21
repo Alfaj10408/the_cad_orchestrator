@@ -114,3 +114,27 @@ def write_report(project_id: str, results: list[dict]) -> dict:
     reports.mkdir(parents=True, exist_ok=True)
     (reports / "component_validation.json").write_text(json.dumps(report, indent=2))
     return report
+
+
+def write_metrics(project_id: str, records: list[dict]) -> dict:
+    passed = sum(1 for r in records if r.get("valid"))
+    turns_total = sum(r.get("turns_total") or 0 for r in records)
+    repairs_total = sum(r.get("repairs") or 0 for r in records)
+    duration_total = sum(r.get("duration_seconds") or 0 for r in records)
+    n = len(records)
+    report = {
+        "project_id": project_id,
+        "components": records,
+        "totals": {
+            "components": n,
+            "passed": passed,
+            "turns_total": turns_total,
+            "repairs_total": repairs_total,
+            "avg_turns_per_component": (turns_total / n) if n else 0,
+            "duration_total_s": round(duration_total, 1),
+        },
+    }
+    reports = paths.project_dir(project_id) / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "component_metrics.json").write_text(json.dumps(report, indent=2))
+    return report
