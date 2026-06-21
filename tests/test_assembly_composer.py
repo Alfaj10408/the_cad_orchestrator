@@ -39,7 +39,7 @@ def test_emit_source_uses_absolute_steps_and_compound():
     assert "from build123d import *" in src
     assert src.count("import_step(") == 3            # 1 fuselage + 2 arms
     assert ws in src                                 # absolute workspace path embedded
-    assert "Compound(" in src  # OCC-builder compound (avoids cadpy step tool segfault)
+    assert "Compound(_c)" in src  # OCC-builder compound (avoids cadpy step tool segfault)
     # AST-based check: no banned imports (os, subprocess)
     assert _banned_imports(src) == set()
     # Verify source is syntactically valid
