@@ -248,3 +248,24 @@ calibration 0 · mounting 0 · drone 3 (8 components) · gear 0. (Drone needed 3
 - Verification: 34 unit tests pass; 3.2 first-action=Write/2 turns/valid; 3.3 repair Edit-only/4 turns/recovered.
 
 *Fix scope only: component prompt + turn constants. Bash-off, Edit-repair, metrics, deterministic assembly, Qwen prompts, frontend, API all unchanged.*
+
+---
+
+# Error-aware repair hints (2026-06-21) — partial
+
+10-object benchmark (Bash-off/12) failed at object 4: **drone `FAILED_CAD`** — only `arm` failed, build123d `FilletError` (radius 0.2), repair did not converge in 2 attempts (Claude kept the invalid fillet). Fix: `component_validator._repair_hint(reason)` appends build123d-specific remediation to `repair_prompt` for known classes (fillet / chamfer / NameError-AttributeError / empty-degenerate). Commit `417552a`.
+
+## Verification
+- Unit: 40 tests pass (6 new repair-hint tests).
+- **2.2 fillet convergence (decisive, live):** seeded an arm with `fillet(edges, 1.5)` (guaranteed `FilletError`). With the hint, Claude reduced `FILLET 1.5 → 0.5` via Edit (Bash off), valid in **3 turns / 1 repair** — vs the prior 3-attempt non-convergence. **The targeted class is fixed.**
+- **2.3 drone re-run: STILL `FAILED_CAD` (7/8).** Arm passed cleanly this run (2 turns, 0 repairs — fillet not tripped); **`motor_pod` failed** with a *different* error: `TypeError: BuildSketch.__init__() got an unexpected keyword argument 'origin'` (source: `BuildSketch(Plane.XY, origin=loc)`). 8 turns / 2 repairs, no convergence.
+
+## Finding
+The drone is nondeterministic — each run a different component trips a different build123d error (run 1: arm fillet; run 2: motor_pod BuildSketch kwarg). The hint helps the classes it matches, but:
+- The new `TypeError: ... unexpected keyword argument` is **not** matched by `_repair_hint` (only NameError/AttributeError/"not defined") → fell through to generic → non-convergence.
+- There is a **long tail of build123d API-misuse errors**; coverage is incomplete and 2 repairs rarely self-correct API misuse without targeted guidance.
+
+## Status
+Fix verified for the fillet class; drone end-to-end **not yet passing**. 10-object benchmark **paused** at object 4 (objects 1–3 PASS: calibration, mounting, gear). Branch not closed — open decision: extend `_repair_hint` to cover `TypeError`/unexpected-keyword (and broaden the build123d API class), then re-run the drone before resuming the benchmark.
+
+*No patch beyond commit `417552a`. No assembly/frontend/API/Qwen changes.*
