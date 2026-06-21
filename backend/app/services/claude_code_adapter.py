@@ -31,6 +31,21 @@ _running: dict[str, asyncio.subprocess.Process] = {}
 _cancelled: set[str] = set()
 
 
+def build_claude_argv(*, prompt: str, model: str, max_turns: int, tools: str) -> list[str]:
+    """Pure argv builder for the headless Claude CLI (testable)."""
+    return [
+        config.CLAUDE_CODE_BINARY, "-p",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--permission-mode", config.CLAUDE_CODE_PERMISSION_MODE,
+        "--tools", tools,
+        "--model", model,
+        "--max-turns", str(max_turns),
+        prompt,
+    ]
+
+
 def classify_failure(*, is_error: bool, result_text, subtype, num_turns, max_turns):
     """Classify a Claude run failure.
 
@@ -239,6 +254,7 @@ async def run_claude(
     *,
     model: Optional[str] = None,
     max_turns: Optional[int] = None,
+    tools: Optional[str] = None,
     timeout: Optional[int] = None,
 ) -> dict:
     """Run Claude Code headless, stream normalized events, return a summary dict.
@@ -250,18 +266,12 @@ async def run_claude(
 
     ws = ensure_workspace(project_id)
     raw_log = ws / "output" / "logs" / "claude_raw.jsonl"
-    binary = config.CLAUDE_CODE_BINARY
-    argv = [
-        binary, "-p",
-        "--output-format", "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--permission-mode", config.CLAUDE_CODE_PERMISSION_MODE,
-        "--tools", config.CLAUDE_CODE_TOOLS,
-        "--model", model or config.CLAUDE_CODE_MODEL,
-        "--max-turns", str(max_turns or config.CLAUDE_CODE_MAX_TURNS),
-        prompt,
-    ]
+    argv = build_claude_argv(
+        prompt=prompt,
+        model=model or config.CLAUDE_CODE_MODEL,
+        max_turns=max_turns or config.CLAUDE_CODE_MAX_TURNS,
+        tools=tools or config.CLAUDE_CODE_TOOLS,
+    )
 
     # Do not leak ANTHROPIC_API_KEY semantics; pass a clean-ish env that keeps
     # the user's authenticated ~/.claude (HOME) but drops any stray API key.
@@ -281,7 +291,8 @@ async def run_claude(
     async with _sem():
         if job_id in _cancelled:
             return {"ok": False, "session_id": None, "result_text": None,
-                    "exit_code": None, "failure_class": None, "error": "cancelled before start"}
+                    "exit_code": None, "failure_class": None, "num_turns": None,
+                    "error": "cancelled before start"}
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -296,7 +307,8 @@ async def run_claude(
             )
         except FileNotFoundError:
             return {"ok": False, "session_id": None, "result_text": None,
-                    "exit_code": None, "failure_class": None, "error": "claude binary not found"}
+                    "exit_code": None, "failure_class": None, "num_turns": None,
+                    "error": "claude binary not found"}
 
         _running[job_id] = proc
         stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, raw_log))
@@ -349,7 +361,8 @@ async def run_claude(
                 pass
             await proc.wait()
             return {"ok": False, "session_id": session_id, "result_text": None,
-                    "exit_code": proc.returncode, "failure_class": "cad", "error": "claude timeout"}
+                    "exit_code": proc.returncode, "failure_class": "cad", "num_turns": None,
+                    "error": "claude timeout"}
         finally:
             stderr_task.cancel()
             _running.pop(job_id, None)
@@ -357,7 +370,8 @@ async def run_claude(
         if job_id in _cancelled:
             _cancelled.discard(job_id)
             return {"ok": False, "session_id": session_id, "result_text": result_text,
-                    "exit_code": proc.returncode, "failure_class": None, "error": "cancelled"}
+                    "exit_code": proc.returncode, "failure_class": None, "num_turns": None,
+                    "error": "cancelled"}
 
         exit_code = proc.returncode
         max_turns_used = max_turns or config.CLAUDE_CODE_MAX_TURNS
@@ -371,6 +385,7 @@ async def run_claude(
             "result_text": result_text,
             "exit_code": exit_code,
             "failure_class": failure_class,
+            "num_turns": result_num_turns,
             "error": None if ok else (
                 f"claude exit {exit_code}, is_error={is_error}"),
         }
