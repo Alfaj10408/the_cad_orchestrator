@@ -201,3 +201,50 @@ Before: turns/component were **not instrumented** (`component_metrics.json` did 
 - The two effects are separable: Bash removal = good; `max_turns=8` = too low for skill-reading components. (Mitigation is a config/prompt change — `CLAUDE_CODE_COMPONENT_MAX_TURNS` is env-overridable — not implemented here per Task 7 = verification only.)
 
 *Verification only. No implementation, prompt, assembly, frontend, or API changes in this step.*
+
+---
+
+# Anti-exploration + turn-budget fix (2026-06-21) — measured
+
+Fix: component prompt rewritten to forbid exploratory reads and mandate `Write`-first (dropped the skill-read line that triggered `/root/.claude/plugins` reads); `CLAUDE_CODE_COMPONENT_MAX_TURNS` 8→12, `NEAR_CAP` 6→8. Bash stays off; Edit-targeted repair, metrics, deterministic assembly unchanged.
+
+## Three-config comparison (same 4 objects)
+
+| Object | Bash-on / turns=15 | Bash-off / turns=8 | **Bash-off / turns=12 + anti-explore** |
+|---|---|---|---|
+| calibration block | COMPLETED 68.1s | COMPLETED 30.3s | **COMPLETED 30.3s** |
+| mounting plate | COMPLETED 80.9s | COMPLETED 29.4s | **COMPLETED 27.2s** |
+| quadcopter drone | COMPLETED 1949.2s | **FAILED_TURNS** | **COMPLETED 1232.9s** |
+| gear housing | COMPLETED 2225.2s | **FAILED_TURNS** | **COMPLETED 1397.8s** |
+| **Pass rate** | 4/4 | **2/4** | **4/4** |
+
+## Turns per component (instrumented)
+
+| Object | Bash-off/8 | **Bash-off/12 + anti-explore** |
+|---|---|---|
+| calibration block | 3 | **2** |
+| mounting plate | 4 | **2** |
+| drone (avg/comp) | 9 → `error_max_turns` (fuselage, 0 writes) | **3.1** (8/8 comps, 25 total) |
+| gear housing (avg/comp) | 9 → `error_max_turns` (0 writes) | **2.1** (8/8 comps, 17 total) |
+
+Bash-on/15 turns were not instrumented (`component_metrics.json` predates that run). Evidence of behavior change: 3.2 single-component run showed the first tool action is now `Write` with **zero** preceding reads (vs the prior 4–5 exploratory dir/plugin/probe reads).
+
+## Duration
+
+| Object | Bash-on/15 | Bash-off/12+anti-explore | Δ |
+|---|---|---|---|
+| calibration block | 68.1s | 30.3s | **−55%** |
+| mounting plate | 80.9s | 27.2s | **−66%** |
+| quadcopter drone | 1949.2s | 1232.9s | **−37%** |
+| gear housing | 2225.2s | 1397.8s | **−37%** |
+
+## Repairs per component
+calibration 0 · mounting 0 · drone 3 (8 components) · gear 0. (Drone needed 3 component repairs; still completed 8/8.)
+
+## Result vs goal — "keep Bash-removal efficiency AND recover 4/4"
+**Achieved.**
+- **Pass rate recovered:** 2/4 → **4/4** (drone + gear COMPLETE again). Zero `FAILED_TURNS`.
+- **Efficiency retained and improved:** every object faster than the Bash-on/15 baseline (−37% to −66%); avg **2–3 turns/component** (vs 9-and-cap-out before). Write-first eliminated exploratory reads.
+- Verification: 34 unit tests pass; 3.2 first-action=Write/2 turns/valid; 3.3 repair Edit-only/4 turns/recovered.
+
+*Fix scope only: component prompt + turn constants. Bash-off, Edit-repair, metrics, deterministic assembly, Qwen prompts, frontend, API all unchanged.*
