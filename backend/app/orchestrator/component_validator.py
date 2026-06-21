@@ -14,7 +14,12 @@ from app.services import cad_runner, claude_code_adapter, llm_cad_generator
 def component_prompt(design_spec: dict, comp: dict) -> str:
     """Skill-aware Claude prompt for ONE component (small, focused task)."""
     bb = comp["target_bbox_mm"]
-    return f"""Use the installed cad skill.
+    return f"""PREFLIGHT — follow exactly:
+- Output EXACTLY ONE file at {comp['source']}. Create no other files.
+- Write the build123d code FIRST. Do NOT execute, run, test, or explore.
+- No shell. No Bash. Stop after writing the file — the backend validates it.
+
+Use the installed cad skill (read its conventions; do not run anything).
 
 You are building ONE component of a {design_spec['object_class']}: the
 `{comp['name']}` ({comp['role']}).
@@ -30,10 +35,10 @@ Requirements:
 - Approximate target envelope: {bb['x']} x {bb['y']} x {bb['z']} mm (a guide, not exact).
 - Closed, positive-volume solid; manufacturable; fillets/chamfers where natural.
 - No file/network I/O; no os/subprocess/socket/shutil/pathlib/requests,
-  no open()/eval()/exec()/__import__. Do NOT execute the code.
+  no open()/eval()/exec()/__import__.
 
-The backend will STEP-export and inspect this component to validate it before
-assembly. Make it a clean, recognizable {comp['name']}.
+The backend will STEP-export and inspect this component to validate it. Make it
+a clean, recognizable {comp['name']}.
 """
 
 

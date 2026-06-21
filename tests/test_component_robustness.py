@@ -6,6 +6,7 @@ if str(_BACKEND) not in sys.path:
 
 from app.services import claude_code_adapter as adapter
 from app.core import config as cfg
+from app.orchestrator import component_validator as cv
 
 
 def test_build_claude_argv_uses_passed_tools_and_turns():
@@ -28,3 +29,20 @@ def test_component_config_defaults():
     # globals unchanged
     assert cfg.CLAUDE_CODE_TOOLS == "Read,Write,Edit,Bash"
     assert cfg.CLAUDE_CODE_MAX_TURNS == 15
+
+
+_SPEC = {"object_class": "quadcopter drone assembly"}
+_COMP = {"name": "fuselage", "role": "central body",
+         "source": "output/components/fuselage/generate.py",
+         "target_bbox_mm": {"x": 112.5, "y": 112.5, "z": 60.0}}
+
+
+def test_component_prompt_has_preflight_and_path():
+    p = cv.component_prompt(_SPEC, _COMP)
+    assert "output/components/fuselage/generate.py" in p
+    low = p.lower()
+    assert "exactly one file" in low
+    assert "do not execute" in low
+    assert "no shell" in low
+    assert "stop after" in low
+    assert "def gen_step()" in p  # existing requirement preserved
