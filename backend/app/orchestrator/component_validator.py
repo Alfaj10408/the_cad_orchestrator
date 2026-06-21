@@ -44,6 +44,24 @@ a clean, recognizable {comp['name']}.
 """
 
 
+def _repair_hint(reason: str) -> str:
+    r = (reason or "").lower()
+    if "fillet" in r and ("radius" in r or "max_fillet" in r):
+        return ("\nHINT: the fillet radius is too large for this geometry. Substantially "
+                "reduce it, use max_fillet() to compute a safe radius, or remove the fillet "
+                "on those edges.\n")
+    if "chamfer" in r:
+        return "\nHINT: the chamfer length is too large. Reduce it or remove the chamfer.\n"
+    if "not defined" in r or "nameerror" in r or "attributeerror" in r:
+        return ("\nHINT: use valid build123d API only — move solids with .moved(Location(...)) "
+                "or Pos(...), place sketch geometry with Locations(...); do not call translate() "
+                "or any undefined name.\n")
+    if "degenerate" in r or "no solid" in r or "empty" in r:
+        return ("\nHINT: the result has no positive-volume solid. Ensure boolean ops do not "
+                "remove all material and that all dimensions are > 0.\n")
+    return ""
+
+
 def repair_prompt(comp: dict, reason: str) -> str:
     return (
         f"\n\n--- REWRITE REQUIRED (component {comp['name']}) ---\n{reason}\n"
@@ -51,6 +69,7 @@ def repair_prompt(comp: dict, reason: str) -> str:
         "the error above. Do not rewrite the whole file. Do not execute or test. "
         "Make the smallest fix that yields a single closed positive-volume solid; "
         "the backend re-validates.\n"
+        + _repair_hint(reason)
     )
 
 
