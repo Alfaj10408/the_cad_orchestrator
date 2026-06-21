@@ -35,7 +35,7 @@
 
 ---
 
-## Phase 1 — Assembly graph (`assembly_graph.py`)
+## Task 1 — Assembly graph (`assembly_graph.py`)
 
 **Files:** Create `backend/app/orchestrator/assembly_graph.py`; Test `tests/test_assembly_graph.py`.
 
@@ -134,11 +134,11 @@ def write_graph(project_id: str, graph: dict) -> str:
 
 ---
 
-## Phase 2 — Placement rules (`placement_rules.py`)
+## Task 2 — Placement rules (`placement_rules.py`)
 
 **Files:** Create `backend/app/orchestrator/placement_rules.py`; Test `tests/test_placement_rules.py`.
 
-**Interfaces — Consumes:** graph from Phase 1. **Produces:** `resolve(graph: dict, design_spec: dict) -> dict` — fills each node's `placement = {"translate_mm":[x,y,z], "rotate_deg":[rx,ry,rz], "rule":str}`; sets `graph["placement_engine"]`.
+**Interfaces — Consumes:** graph from Task 1. **Produces:** `resolve(graph: dict, design_spec: dict) -> dict` — fills each node's `placement = {"translate_mm":[x,y,z], "rotate_deg":[rx,ry,rz], "rule":str}`; sets `graph["placement_engine"]`.
 
 **Exact behavior change:** New pure resolver. Drone domain rules (radial arms 45/135/225/315°, pods at arm tips, props above pods, deck on top, gear/camera/battery on body). Unknown `object_kind` → deterministic centered grid in XY (non-overlapping by envelope/cols).
 
@@ -250,15 +250,15 @@ def resolve(graph: dict, design_spec: dict) -> dict:
 
 ---
 
-## Phase 3 — Assembly composer (`assembly_composer.py`)
+## Task 3 — Assembly composer (`assembly_composer.py`)
 
 **Files:** Create `backend/app/orchestrator/assembly_composer.py`; Test `tests/test_assembly_composer.py`.
 
-**Interfaces — Consumes:** resolved graph (Phase 2), `claude_code_adapter.workspace_dir/safe_workspace_path/ensure_workspace`. **Produces:**
+**Interfaces — Consumes:** resolved graph (Task 2), `claude_code_adapter.workspace_dir/safe_workspace_path/ensure_workspace`. **Produces:**
 - `emit_source(project_id: str, graph: dict) -> str` — returns build123d source string; each node `import_step('<ABS>')`, `.moved(Location(...))`, labelled, into `Compound(children=parts)`.
 - `write_source(project_id: str, graph: dict) -> str` — writes the source to `<workspace>/output/generate.py`, returns it.
 
-**Exact behavior change:** New module. Uses **absolute** STEP paths (resolved against the workspace) so the source runs under `cwd=project_dir`. Machine-written; trusted (not routed through the LLM safety gate — see Phase 6).
+**Exact behavior change:** New module. Uses **absolute** STEP paths (resolved against the workspace) so the source runs under `cwd=project_dir`. Machine-written; trusted (not routed through the LLM safety gate — see Task 6).
 
 - [ ] **Step 1: Write failing test**
 ```python
@@ -327,13 +327,13 @@ def write_source(project_id: str, graph: dict) -> str:
 - [ ] **Step 4: Run, verify pass.**
 - [ ] **Step 5: Checkpoint** (`feat: assembly composer (STEP import)`).
 
-**Tests/verification:** pytest above. (Real STEP execution covered in Phase 8 integration.)
+**Tests/verification:** pytest above. (Real STEP execution covered in Task 8 integration.)
 **Rollback risk:** None — new isolated module; not yet called.
 **Success criteria:** Source defines `gen_step()`, imports one `import_step` per instance with absolute workspace paths, returns a `Compound`, contains no banned tokens.
 
 ---
 
-## Phase 4 — Extend `validate_assembly`; drop Claude assembly prompts
+## Task 4 — Extend `validate_assembly`; drop Claude assembly prompts
 
 **Files:** Modify `backend/app/orchestrator/assembly_builder.py`; Test `tests/test_assembly_validate.py`.
 
@@ -445,12 +445,12 @@ def validate_assembly(project_id: str, code: str, design_spec: dict,
 - [ ] **Step 5: Checkpoint** (`refactor: deterministic assembly validation; drop Claude assembly prompts`).
 
 **Tests/verification:** pytest above.
-**Rollback risk:** Medium — removes `assembly_prompt`/`repair_prompt`. Phase 6 removes their only callers in the same change set; if Phase 6 not yet applied, `claude_generation` import will break. Apply Phases 4 and 6 together, or land Phase 6 first. (Mitigation: do Phase 6 before running the full app.)
+**Rollback risk:** Medium — removes `assembly_prompt`/`repair_prompt`. Task 6 removes their only callers in the same change set; if Task 6 not yet applied, `claude_generation` import will break. Apply Tasks 4 and 6 together, or land Task 6 first. (Mitigation: do Task 6 before running the full app.)
 **Success criteria:** Node-count mismatch and oversized bbox fail; clean assembly passes; old prompt functions gone.
 
 ---
 
-## Phase 5 — Claude result failure classification (`claude_code_adapter.py`)
+## Task 5 — Claude result failure classification (`claude_code_adapter.py`)
 
 **Files:** Modify `backend/app/services/claude_code_adapter.py`; Test `tests/test_failure_classifier.py`.
 
@@ -522,16 +522,16 @@ Also add `"failure_class": None` to the early-return dicts (binary-not-found, ca
 - [ ] **Step 5: Checkpoint** (`feat: classify Claude failures (quota/turns/cad)`).
 
 **Tests/verification:** pytest above.
-**Rollback risk:** Low — additive field; existing callers ignore `failure_class` until Phase 6.
+**Rollback risk:** Low — additive field; existing callers ignore `failure_class` until Task 6.
 **Success criteria:** Classifier returns correct class for quota/turns/cad/ok; `run_claude` returns `failure_class`.
 
 ---
 
-## Phase 6 — Wire failure classes + deterministic assembly into `claude_generation.py`
+## Task 6 — Wire failure classes + deterministic assembly into `claude_generation.py`
 
 **Files:** Modify `backend/app/services/claude_generation.py`; Test `tests/test_claude_generation_wiring.py`.
 
-**Interfaces — Consumes:** Phases 1–5. Uses `assembly_graph`, `placement_rules`, `assembly_composer`, `assembly_builder.validate_assembly`, `run_claude` `failure_class`.
+**Interfaces — Consumes:** Tasks 1–5. Uses `assembly_graph`, `placement_rules`, `assembly_composer`, `assembly_builder.validate_assembly`, `run_claude` `failure_class`.
 
 **Exact behavior changes:**
 1. `fail()` gains a `status` arg (default `"FAILED"` for back-compat) so it can set `FAILED_CAD/QUOTA/TURNS`.
@@ -618,13 +618,13 @@ def test_quota_aborts_without_repair(monkeypatch):
 - [ ] **Step 4: Run, verify pass.**
 - [ ] **Step 5: Checkpoint** (`feat: deterministic assembly stage + failure-class wiring`).
 
-**Tests/verification:** pytest above + Phase 8 integration.
-**Rollback risk:** **High** — core pipeline edit. Keep the old assembly block in a `git stash`/backup copy; the wiring test + Phase 8 drone integration are the gates. The single-shot branch still exists after this phase (removed in Phase 7), so simple parts are unaffected here.
+**Tests/verification:** pytest above + Task 8 integration.
+**Rollback risk:** **High** — core pipeline edit. Keep the old assembly block in a `git stash`/backup copy; the wiring test + Task 8 drone integration are the gates. The single-shot branch still exists after this phase (removed in Task 7), so simple parts are unaffected here.
 **Success criteria:** Quota fails fast as `FAILED_QUOTA` with one call; complex objects reach the deterministic assembly stage with zero assembly Claude calls.
 
 ---
 
-## Phase 7 — Route simple parts through the 1-node graph; remove single-shot branch
+## Task 7 — Route simple parts through the 1-node graph; remove single-shot branch
 
 **Files:** Modify `backend/app/services/claude_generation.py`; Test `tests/test_simple_part_path.py`.
 
@@ -687,12 +687,12 @@ def test_simple_part_uses_one_node_graph(monkeypatch):
 - [ ] **Step 5: Checkpoint** (`refactor: route simple parts through 1-node graph; remove single-shot`).
 
 **Tests/verification:** pytest above.
-**Rollback risk:** **High** — removes the single-shot path entirely. Gate with this test + Phase 8 calibration-block/mounting-plate mini-benchmark. Back up the removed block.
+**Rollback risk:** **High** — removes the single-shot path entirely. Gate with this test + Task 8 calibration-block/mounting-plate mini-benchmark. Back up the removed block.
 **Success criteria:** Simple part produces a 1-node `assembly_graph.json` and `COMPLETED`; no single-shot code path remains.
 
 ---
 
-## Phase 8 — Verification (the required closing phases)
+## Task 8 — Verification (the required closing phases)
 
 > Real CAD + (limited) real Claude. Run when component STEPs / Claude quota are available. Each sub-phase is its own gate.
 
@@ -723,8 +723,8 @@ def test_simple_part_uses_one_node_graph(monkeypatch):
 
 ## Self-review
 
-**Spec coverage:** STEP-import reuse (Phase 3, abs paths) ✓; no `gen_step()` re-exec (composer imports STEPs only) ✓; `assembly_graph.json` with node ids/parent/component_type/placement (Phase 1+2) ✓; FAILED_CAD/QUOTA/TURNS + quota abort-fast (Phase 5+6) ✓; deterministic placement domain+generic (Phase 2) ✓; extended assembly validation (Phase 4) ✓; remove monolithic single-shot + assembly Claude calls (Phase 6+7) ✓; required closing phases 1–5 (Phase 8) ✓; no frontend/Qwen/CAD-prompt changes (Global Constraints) ✓.
+**Spec coverage:** STEP-import reuse (Task 3, abs paths) ✓; no `gen_step()` re-exec (composer imports STEPs only) ✓; `assembly_graph.json` with node ids/parent/component_type/placement (Task 1+2) ✓; FAILED_CAD/QUOTA/TURNS + quota abort-fast (Task 5+6) ✓; deterministic placement domain+generic (Task 2) ✓; extended assembly validation (Task 4) ✓; remove monolithic single-shot + assembly Claude calls (Task 6+7) ✓; required closing phases 1–5 (Task 8) ✓; no frontend/Qwen/CAD-prompt changes (Global Constraints) ✓.
 **Placeholder scan:** none — every code step has full code.
 **Type consistency:** `build_graph→dict`, `resolve(graph, spec)→dict` (mutates+returns), `emit_source(project_id, graph)→str`, `write_source(project_id, graph)→str`, `validate_assembly(pid, code, spec, graph=None)→dict`, `classify_failure(...)→str|None`, `run_claude` adds `failure_class`. Consistent across phases.
 
-**Known sequencing constraint:** Phases 4 and 6 must land together (Phase 4 deletes `assembly_prompt`; Phase 6 removes its caller). Implement 5 → 6 → 4 → 7, or 4+6 as one reviewed unit.
+**Known sequencing constraint:** Tasks 4 and 6 must land together (Task 4 deletes `assembly_prompt`; Task 6 removes its caller). Implement 5 → 6 → 4 → 7, or 4+6 as one reviewed unit.
