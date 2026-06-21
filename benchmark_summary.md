@@ -150,3 +150,54 @@ Validated independently: a 16-instance deterministic drone assembly ran clean (1
 5. **Deterministic assembly composes validated STEPs as-is** — no inter-component boolean fusing/interference resolution; parts are placed, not merged. Acceptable for concept CAD; matters for later manufacturing/URDF stages.
 
 *Refactor scope only: assembly determinism + failure classification. CAD modeling quality, Qwen prompts, decomposition, and frontend unchanged.*
+
+---
+
+# Component turn robustness (2026-06-21) — measured verification
+
+Component calls switched to `tools=Read,Write,Edit` (no Bash) + `max_turns=8` + Edit-targeted repair + per-component metrics. 4-object rerun vs the prior (Bash-on, `max_turns=15`) post-refactor run. **Evidence below; mixed result.**
+
+## Before vs after (same 4 objects)
+
+| Object | BEFORE (Bash on, turns=15) | AFTER (Bash off, turns=8) |
+|---|---|---|
+| calibration block | COMPLETED, 68.1s, 1 repair | COMPLETED, **30.3s**, **3 turns**, 0 repairs |
+| mounting plate | COMPLETED, 80.9s, 1 repair | COMPLETED, **29.4s**, **4 turns**, 0 repairs |
+| quadcopter drone | COMPLETED, 1949.2s, 8/8, 2 repairs | **FAILED_TURNS**, 28.4s, 0 components |
+| gear housing | COMPLETED, 2225.2s, 8/8, 2 repairs | **FAILED_TURNS**, 24.4s, 0 components |
+
+## Turns per component (after, from `component_metrics.json`)
+
+| Object | reads | writes | turns | result |
+|---|---|---|---|---|
+| calibration block | 2 | 2 | 3 | valid |
+| mounting plate | 4 | 2 | 4 | valid |
+| drone (fuselage, 1st comp) | 16 | 0 | 9 → `error_max_turns` | FAILED_TURNS |
+| gear housing (1st comp) | 16 | 0 | 9 → `error_max_turns` | FAILED_TURNS |
+
+Before: turns/component were **not instrumented** (`component_metrics.json` did not exist pre-change); the 2026-06-19 run showed components could reach `num_turns:16`.
+
+## Repairs per component (after)
+- calibration block: 0 · mounting plate: 0 · drone/gear: n/a (aborted on first component, no repair entered).
+- Earlier single-component live test (mounting plate, separate run): 1 repair, turns `[5,3]`. Run-to-run variance present.
+
+## Success rates
+| | BEFORE | AFTER |
+|---|---|---|
+| Simple objects | 2/2 (100%) | 2/2 (100%) |
+| Hierarchical objects | 2/2 (100%) | **0/2 (0%)** |
+| Overall (4 objects) | 4/4 (100%) | **2/4 (50%)** |
+| Component success (within attempted) | — | simple 2/2; hierarchical 0 (never wrote) |
+
+## New regressions
+- **drone, gear housing: COMPLETED → FAILED_TURNS.** Evidence: first component's Claude call made **16 Read calls and 0 Write calls**, hit `subtype:error_max_turns` at `num_turns:9` (> cap 8) before writing any source; `failure_class="turns"` → immediate `FAILED_TURNS` abort (as specified). Near-cap event fired: `"Component fuselage near turn cap: 9/8"`.
+- Root cause: `max_turns=8` is too tight when a component call reads the cad skill heavily (16 reads here) — the budget is exhausted on skill exploration before the Write. Simple parts happened to read lightly (2–4 reads) and fit.
+
+## Most important question — did Bash removal + constraints improve efficiency without reducing pass rate?
+
+**NO (on this run).** Evidence:
+- **Efficiency improved for simple objects:** 68→30s and 81→29s wall-clock (~2.4–2.7×), 3–4 turns, 0 repairs, no Bash self-test loops.
+- **Pass rate regressed for hierarchical objects:** 4/4 → 2/4. Bash removal succeeded (0 Bash calls observed), but the `max_turns=8` cap caused skill-heavy component calls to exhaust turns reading before writing → `error_max_turns`.
+- The two effects are separable: Bash removal = good; `max_turns=8` = too low for skill-reading components. (Mitigation is a config/prompt change — `CLAUDE_CODE_COMPONENT_MAX_TURNS` is env-overridable — not implemented here per Task 7 = verification only.)
+
+*Verification only. No implementation, prompt, assembly, frontend, or API changes in this step.*
