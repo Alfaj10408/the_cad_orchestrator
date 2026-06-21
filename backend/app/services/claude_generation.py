@@ -36,7 +36,6 @@ from app.services import (
     claude_code_adapter,
     event_service,
     job_service,
-    llm_cad_generator,
     report_service,
 )
 
@@ -48,96 +47,6 @@ def _now() -> str:
 def _load_brief(project_id: str) -> dict:
     p = paths.project_dir(project_id) / "brief.json"
     return json.loads(p.read_text()) if p.exists() else {}
-
-
-def _build_claude_prompt(spec: dict, repair_error: str | None = None) -> str:
-    """Detailed, cad-skill-aware Claude task prompt (demo-quality CAD)."""
-    object_kind = spec.get("object_kind") or "the requested object"
-    features = spec.get("features") or []
-    min_feat = spec.get("min_feature_count", 8)
-    complex_obj = spec.get("complex", True)
-    explicit_primitive = spec.get("explicit_primitive", False)
-    feat_lines = "\n".join(f"  {i}. {f}" for i, f in enumerate(features, 1))
-
-    reject_clause = (
-        "DO NOT output a placeholder or a single Box(...)/cube. A primitive "
-        "block-only result is REJECTED and will be sent back for rewrite."
-        if not explicit_primitive
-        else "A simple primitive block is acceptable here (the user asked for one)."
-    )
-
-    base = f"""You are a CAD engineer. The installed `cad` skill is available — use its
-STEP-first build123d conventions to create a detailed CAD model of {object_kind}.
-
-Read the full specification at input/project_spec.json first.
-
-DELIVERABLE — write these files inside your workspace ONLY:
-- output/generate.py            build123d source defining exactly `def gen_step():`
-                                returning ONE build123d assembly Compound (or Solid).
-- output/generation_summary.json   {{"status":"completed","generator":"claude_code",
-                                "planner":"qwen","project_id":"{spec.get('project_id','')}",
-                                "files_created":["output/generate.py"],"assumptions":[],"warnings":[]}}
-- output/artifact_manifest.json    {{"artifacts":[{{"type":"step","path":"artifacts/model.step"}},
-                                {{"type":"stl","path":"artifacts/model.stl"}},
-                                {{"type":"glb","path":"artifacts/model.glb"}},
-                                {{"type":"preview","path":"artifacts/snapshot.png"}}]}}
-
-The backend will execute gen_step() to generate STEP, then STL and GLB, render a
-snapshot PNG, and run CAD inspection. Write the model so ALL of those succeed.
-
-build123d source requirements:
-- Start with: from build123d import *
-- Named dimension variables in millimeters near the top.
-- Origin at part center, XY base plane, +Z up; units are millimeters.
-- Every solid CLOSED and POSITIVE-VOLUME. Build separate NAMED components where
-  possible (future URDF-ready links/joints), then boolean-union them into a single
-  assembly Compound returned by gen_step().
-- Do NOT read/write files; no os/subprocess/socket/shutil/pathlib/requests,
-  no open()/eval()/exec()/__import__. Do NOT execute the code yourself.
-
-QUALITY BAR — demo-quality, recognizable:
-- The model MUST visibly look like {object_kind}, not an abstract block.
-- Implement ALL of these named features (at least {min_feat}):
-{feat_lines}
-- Manufacturability: sensible wall thickness, fillets/chamfers where natural,
-  3D-print friendly, no zero-thickness faces.
-- {reject_clause}
-
-Dimensions: {spec.get('dimensions', 'choose sensible')} ({spec.get('units', 'mm')}).
-Material: {spec.get('material', 'PLA')}.
-
-Engineering plan from the Qwen planner:
-{spec.get('plan', '')}
-"""
-    if not complex_obj:
-        base += "\n(This is a simple part — a clean single solid is fine.)\n"
-    if repair_error:
-        base += (
-            "\n--- REWRITE REQUIRED ---\n"
-            f"{repair_error}\n"
-            "Rewrite output/generate.py to fully satisfy the named features above "
-            "and produce a recognizable, closed, positive-volume assembly.\n"
-        )
-    return base
-
-
-async def _run_cad(project_id: str, code: str) -> dict:
-    """Validate + run the existing deterministic CAD export pipeline (in thread)."""
-    ok, reason = llm_cad_generator.check_code_safety(code)
-    if not ok:
-        return {"ok": False, "stage": "validation", "error": reason}
-
-    def _work() -> dict:
-        cad_runner.generate_source_from_llm(project_id, code)
-        step = cad_runner.export_step(project_id)
-        if not step["ok"]:
-            return {"ok": False, "stage": "step", "error": step.get("stderr") or "STEP export failed"}
-        meshes = cad_runner.export_meshes(project_id)
-        insp = cad_runner.inspect_step(project_id)
-        snap = cad_runner.generate_snapshot(project_id)
-        return {"ok": True, "step": step, "meshes": meshes, "insp": insp, "snap": snap}
-
-    return await asyncio.to_thread(_work)
 
 
 async def _run_cad_trusted(project_id: str, code: str) -> dict:
@@ -157,44 +66,6 @@ async def _run_cad_trusted(project_id: str, code: str) -> dict:
         cad_runner.generate_snapshot(project_id)
         return {"ok": True}
     return await asyncio.to_thread(_work)
-
-
-def _quality_gate(project_id: str, code: str, spec: dict) -> dict:
-    """Post-generation detail check. Flags low_detail / primitive_box output."""
-    size = len(code.encode("utf-8"))
-    low_detail = size < 1200
-
-    solids = faces = edges = None
-    insp = paths.project_dir(project_id) / "reports" / "inspection.txt"
-    if insp.exists():
-        try:
-            s = json.loads(insp.read_text())["tokens"][0]["summary"]
-            solids, faces, edges = s.get("shapeCount"), s.get("faceCount"), s.get("edgeCount")
-        except Exception:  # noqa: BLE001
-            pass
-
-    is_box = solids == 1 and faces == 6 and edges == 12
-    complex_obj = spec.get("complex", True) and not spec.get("explicit_primitive", False)
-    primitive_box_output = bool(is_box and complex_obj)
-
-    flags = []
-    if low_detail and complex_obj:
-        flags.append("low_detail_output")
-    if primitive_box_output:
-        flags.append("primitive_box_output")
-
-    result = {
-        "source_bytes": size, "solids": solids, "faces": faces, "edges": edges,
-        "low_detail_output": low_detail and complex_obj,
-        "primitive_box_output": primitive_box_output, "flags": flags,
-    }
-    try:
-        (paths.project_dir(project_id) / "reports" / "quality.json").write_text(
-            json.dumps(result, indent=2)
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    return result
 
 
 def _read_generate_py(project_id: str) -> tuple[str | None, str | None]:
@@ -247,15 +118,6 @@ async def run(project_id: str, job_id: str) -> None:
         # Claude reads the full work order from its sandbox input.
         ws = claude_code_adapter.ensure_workspace(project_id)
         (ws / "input" / "project_spec.json").write_text(json.dumps(wo, indent=2))
-
-        # Quality-gate spec view (small subset used by _quality_gate).
-        meta = wo["_meta"]
-        spec = {
-            "complex": meta["complex"],
-            "explicit_primitive": meta["explicit_primitive"],
-            "object_kind": meta["object_kind"],
-            "features": wo["required_components"],
-        }
 
         await ch.publish(SOURCE_QWEN, "planner.delta", stage="planning",
                          message=f"Components: {', '.join(wo['required_components'][:8])}")
@@ -377,10 +239,14 @@ async def run(project_id: str, job_id: str) -> None:
         # ---- 5-6. Deterministic assembly (no Claude) ----
         if job:
             job.stage = "ASSEMBLY_GENERATION"; job_service.save_job(job)
-        graph = assembly_graph.build_graph(manifest, design_spec)
-        placement_rules.resolve(graph, design_spec)
-        assembly_graph.write_graph(project_id, graph)
-        assembly_composer.write_source(project_id, graph)
+        try:
+            graph = assembly_graph.build_graph(manifest, design_spec)
+            placement_rules.resolve(graph, design_spec)
+            assembly_graph.write_graph(project_id, graph)
+            assembly_composer.write_source(project_id, graph)
+        except ValueError as exc:
+            await fail("ASSEMBLY_GENERATION", str(exc), status="FAILED_CAD")
+            return
         code, err = _read_generate_py(project_id)
         if code is None:
             await fail("ASSEMBLY_GENERATION", err or "composer wrote no source",

@@ -49,3 +49,16 @@ def test_bbox_exceeds_envelope_fails():
     assert r["bbox_within_envelope"] is False
     assert "bbox_exceeds_envelope" in r["flags"]
     assert r["valid"] is False
+
+
+def test_no_inspection_fails_closed():
+    """When graph is present but inspection.txt is absent, validate_assembly must fail closed."""
+    pid = "valasm_t4_no_insp"
+    # Ensure no inspection.txt exists for this fresh project id
+    insp = paths.project_dir(pid) / "reports" / "inspection.txt"
+    if insp.exists():
+        insp.unlink()
+    graph = {"node_count": 3}
+    r = assembly_builder.validate_assembly(pid, "x" * 2000, SPEC, graph=graph)
+    assert r["valid"] is False
+    assert "no_inspection" in r["flags"]

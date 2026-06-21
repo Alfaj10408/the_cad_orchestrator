@@ -33,6 +33,9 @@ def validate_assembly(project_id: str, code: str, design_spec: dict,
     bbox_within_envelope = True
     expected_nodes = None
     if graph is not None:
+        if solids is None:
+            # inspection.txt missing or unparseable → fail closed
+            flags.append("no_inspection")
         expected_nodes = graph.get("node_count")
         # >= : merged/extra solids are acceptable; fewer than the graph's nodes is a failure
         node_count_ok = (solids or 0) >= (expected_nodes or 0)
