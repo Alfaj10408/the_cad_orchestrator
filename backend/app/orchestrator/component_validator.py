@@ -15,11 +15,13 @@ def component_prompt(design_spec: dict, comp: dict) -> str:
     """Skill-aware Claude prompt for ONE component (small, focused task)."""
     bb = comp["target_bbox_mm"]
     return f"""PREFLIGHT — follow exactly:
-- Output EXACTLY ONE file at {comp['source']}. Create no other files.
-- Write the build123d code FIRST. Do NOT execute, run, test, or explore.
-- No shell. No Bash. Stop after writing the file — the backend validates it.
-
-Use the installed cad skill (read its conventions; do not run anything).
+- Your FIRST tool action MUST be `Write` to {comp['source']}. Do NOT Read or list anything before writing.
+- Do NOT inspect directories, do not list the workspace, do not probe whether {comp['source']} exists,
+  and do not read or inspect /root/.claude or any plugins. The target directory is created for you.
+- Assume the target path is correct. Write the file immediately from your own build123d knowledge —
+  do NOT read skill files or plugin files.
+- Output EXACTLY ONE file at {comp['source']}. Create no other files. No shell. No Bash.
+- After writing, STOP. The backend validates and, if needed, sends a targeted repair.
 
 You are building ONE component of a {design_spec['object_class']}: the
 `{comp['name']}` ({comp['role']}).

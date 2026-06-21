@@ -43,11 +43,12 @@ def test_component_prompt_has_preflight_and_path():
     p = cv.component_prompt(_SPEC, _COMP)
     assert "output/components/fuselage/generate.py" in p
     low = p.lower()
-    assert "exactly one file" in low
-    assert "do not execute" in low
-    assert "no shell" in low
-    assert "stop after" in low
-    assert "def gen_step()" in p  # existing requirement preserved
+    assert "first" in low and "write" in low          # write-first directive
+    assert "do not inspect" in low or "do not read or list" in low
+    assert "plugins" in low                            # explicitly forbids plugin inspection
+    assert "do not read" in low and "skill" in low     # forbids reading skill files
+    assert "use the installed cad skill" not in low    # old skill-read line removed
+    assert "def gen_step()" in p                       # build123d requirement preserved
 
 
 def test_repair_prompt_is_edit_targeted_and_carries_error():
