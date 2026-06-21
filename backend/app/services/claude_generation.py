@@ -261,7 +261,7 @@ async def run(project_id: str, job_id: str) -> None:
                                     "valid": False, "reason": c_reason, "facts": None})
                     metric_records.append({
                         "name": comp["name"], "attempts": c_repair,
-                        "repairs": c_repair, "turns_total": sum(turns_per_attempt),
+                        "repairs": c_repair - 1, "turns_total": sum(turns_per_attempt),
                         "turns_per_attempt": turns_per_attempt,
                         "duration_seconds": round(time.monotonic() - comp_start, 1),
                         "failure_class": last_fc,
