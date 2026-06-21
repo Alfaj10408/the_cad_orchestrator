@@ -271,12 +271,21 @@ async def run(project_id: str, job_id: str) -> None:
         # ---- 2. Decompose: engineering spec + component manifest ----
         design_spec = component_planner.build_design_spec(project_id, brief, wo)
         manifest = component_planner.build_component_manifest(project_id, brief, design_spec)
-        hierarchical = design_spec["complex"] and manifest["component_count"] >= 2
+        if manifest["component_count"] < 2:
+            only = {"name": "part", "quantity": 1,
+                    "role": design_spec.get("object_kind", "part"),
+                    "target_bbox_mm": {  # from envelope
+                        "x": design_spec["overall_envelope_mm"]["x"],
+                        "y": design_spec["overall_envelope_mm"]["y"],
+                        "z": design_spec["overall_envelope_mm"]["z"]},
+                    "source": "output/components/part/generate.py",
+                    "step": "output/components/part/part.step", "status": "pending"}
+            manifest = {**manifest, "component_count": 1, "components": [only]}
+        # (always run the hierarchical component loop + deterministic assembly below)
         await ch.publish(
             SOURCE_QWEN, "planner.delta", stage="planning",
             message=(f"Decomposed into {manifest['component_count']} components: "
-                     + ", ".join(c["name"] for c in manifest["components"])) if hierarchical
-            else "Simple part — single-shot generation",
+                     + ", ".join(c["name"] for c in manifest["components"])),
         )
 
         async def _claude_call(prompt: str) -> tuple[str, dict]:
@@ -297,149 +306,100 @@ async def run(project_id: str, job_id: str) -> None:
 
         code: str | None = None
 
-        if hierarchical:
-            # ---- 3-4. Generate + validate each component independently ----
-            if job:
-                job.stage = "COMPONENT_GENERATION"; job_service.save_job(job)
-            results: list[dict] = []
-            for comp in manifest["components"]:
-                await ch.publish(SOURCE_QWEN, "planner.delta", stage="components",
-                                 message=f"Component: {comp['name']} ({comp['role']})")
-                c_reason: str | None = None
-                c_repair = 0
-                while True:
-                    cprompt = component_validator.component_prompt(design_spec, comp)
-                    if c_reason:
-                        cprompt += component_validator.repair_prompt(comp, c_reason)
-                    status, res = await _claude_call(cprompt)
-                    if status == "cancel":
-                        await _do_cancel(); return
-                    if status == "fail":
-                        fc = res.get("failure_class")
-                        if fc == "quota":
-                            await fail("COMPONENT_GENERATION",
-                                       res.get("error") or "quota limit reached",
-                                       status="FAILED_QUOTA")
-                            return
-                        if fc == "turns":
-                            await fail("COMPONENT_GENERATION",
-                                       res.get("error") or "max turns reached",
-                                       status="FAILED_TURNS")
-                            return
-                        # fc == "cad" or None — enter/continue repair loop
-                        c_reason = res.get("error") or "Claude failed"
-                    else:
-                        cpath = claude_code_adapter.safe_workspace_path(
-                            claude_code_adapter.workspace_dir(project_id), comp["source"])
-                        if cpath is None or not cpath.is_file():
-                            c_reason = "component source not written"
-                        else:
-                            await ch.publish(SOURCE_WORKER, "cad.execution.started",
-                                             stage="cad_execution",
-                                             message=f"Validating component {comp['name']}")
-                            ex = await asyncio.to_thread(
-                                component_validator.run_component, project_id, comp, cpath.read_text())
-                            v = component_validator.validate_component(comp, ex)
-                            if v["valid"]:
-                                await ch.publish(SOURCE_WORKER, "cad.execution.completed",
-                                                 stage="cad_execution",
-                                                 message=f"Component {comp['name']} valid {v['facts']}")
-                                comp["status"] = "valid"; results.append(v); break
-                            c_reason = v["reason"]
-                    c_repair += 1
-                    await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
-                                     message=f"Component {comp['name']} repair "
-                                             f"{c_repair}/{config.CLAUDE_CODE_MAX_REPAIRS}: {str(c_reason)[:120]}")
-                    if c_repair > config.CLAUDE_CODE_MAX_REPAIRS:
-                        comp["status"] = "invalid"
-                        results.append({"name": comp["name"], "step": comp["step"],
-                                        "valid": False, "reason": c_reason, "facts": None})
-                        # Attempt all remaining components before failing; break inner loop only.
-                        break
-
-            report = component_validator.write_report(project_id, results)
-            await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
-                             message=f"Components validated: {report['passed']}/{report['total']}")
-            if report["passed"] < report["total"]:
-                bad = [r["name"] for r in results if not r["valid"]]
-                await fail("COMPONENT_VALIDATION", f"components failed validation: {bad}",
-                           status="FAILED_CAD")
-                return
-
-            # ---- 5-6. Deterministic assembly (no Claude) ----
-            if job:
-                job.stage = "ASSEMBLY_GENERATION"; job_service.save_job(job)
-            graph = assembly_graph.build_graph(manifest, design_spec)
-            placement_rules.resolve(graph, design_spec)
-            assembly_graph.write_graph(project_id, graph)
-            assembly_composer.write_source(project_id, graph)
-            code, err = _read_generate_py(project_id)
-            if code is None:
-                await fail("ASSEMBLY_GENERATION", err or "composer wrote no source",
-                           status="FAILED_CAD"); return
-            await ch.publish(SOURCE_WORKER, "cad.execution.started", stage="cad_execution",
-                             message=f"Composing assembly ({graph['node_count']} parts, "
-                                     f"{graph['placement_engine']})")
-            if job:
-                job.stage = "ASSEMBLY_EXECUTION"; job_service.save_job(job)
-            cad = await _run_cad_trusted(project_id, code)
-            if not cad["ok"]:
-                await fail("ASSEMBLY_EXECUTION", cad.get("error", "assembly CAD failed"),
-                           status="FAILED_CAD"); return
-            av = assembly_builder.validate_assembly(project_id, code, design_spec, graph=graph)
-            if not av["valid"]:
-                await fail("ASSEMBLY_VALIDATION", ", ".join(av["flags"]) or "assembly invalid",
-                           status="FAILED_CAD"); return
-            await ch.publish(SOURCE_WORKER, "cad.execution.completed", stage="cad_execution",
-                             message=f"Assembly valid (solids={av['solids']}, faces={av['faces']})")
-
-        else:
-            # ---- Single-shot path (simple parts) — unchanged behavior ----
-            repair_error: str | None = None
-            attempt = 0
-            quality_attempt = 0
+        # ---- 3-4. Generate + validate each component independently ----
+        if job:
+            job.stage = "COMPONENT_GENERATION"; job_service.save_job(job)
+        results: list[dict] = []
+        for comp in manifest["components"]:
+            await ch.publish(SOURCE_QWEN, "planner.delta", stage="components",
+                             message=f"Component: {comp['name']} ({comp['role']})")
+            c_reason: str | None = None
+            c_repair = 0
             while True:
-                prompt = claude_prompt
-                if repair_error:
-                    prompt = (claude_prompt
-                              + "\n\n--- REWRITE REQUIRED (repair) ---\n" + repair_error
-                              + "\nChange only the smallest responsible source section.\n")
-                status, res = await _claude_call(prompt)
+                cprompt = component_validator.component_prompt(design_spec, comp)
+                if c_reason:
+                    cprompt += component_validator.repair_prompt(comp, c_reason)
+                status, res = await _claude_call(cprompt)
                 if status == "cancel":
                     await _do_cancel(); return
                 if status == "fail":
-                    await fail("CLAUDE_CODE_GENERATION", res.get("error") or "Claude Code failed")
-                    return
-                code, err = _read_generate_py(project_id)
-                if code is None:
-                    await fail("CLAUDE_CODE_GENERATION", err or "missing generate.py")
-                    return
-                await ch.publish(SOURCE_WORKER, "cad.execution.started", stage="cad_execution",
-                                 message="Executing build123d source -> STEP/STL/GLB")
-                if job:
-                    job.stage = "CAD_EXECUTION"; job_service.save_job(job)
-                cad = await _run_cad(project_id, code)
-                if cad["ok"]:
-                    await ch.publish(SOURCE_WORKER, "cad.execution.completed", stage="cad_execution",
-                                     message="CAD execution succeeded")
-                    q = _quality_gate(project_id, code, spec)
-                    if q["flags"]:
-                        await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
-                                         message=f"Quality flags: {', '.join(q['flags'])}")
-                    if q["primitive_box_output"] and quality_attempt < 1:
-                        quality_attempt += 1
-                        repair_error = (
-                            "The result is a primitive box and does not satisfy the requested "
-                            f"{spec.get('object_kind', 'object')}. Rewrite with the required features.")
-                        continue
+                    fc = res.get("failure_class")
+                    if fc == "quota":
+                        await fail("COMPONENT_GENERATION",
+                                   res.get("error") or "quota limit reached",
+                                   status="FAILED_QUOTA")
+                        return
+                    if fc == "turns":
+                        await fail("COMPONENT_GENERATION",
+                                   res.get("error") or "max turns reached",
+                                   status="FAILED_TURNS")
+                        return
+                    # fc == "cad" or None — enter/continue repair loop
+                    c_reason = res.get("error") or "Claude failed"
+                else:
+                    cpath = claude_code_adapter.safe_workspace_path(
+                        claude_code_adapter.workspace_dir(project_id), comp["source"])
+                    if cpath is None or not cpath.is_file():
+                        c_reason = "component source not written"
+                    else:
+                        await ch.publish(SOURCE_WORKER, "cad.execution.started",
+                                         stage="cad_execution",
+                                         message=f"Validating component {comp['name']}")
+                        ex = await asyncio.to_thread(
+                            component_validator.run_component, project_id, comp, cpath.read_text())
+                        v = component_validator.validate_component(comp, ex)
+                        if v["valid"]:
+                            await ch.publish(SOURCE_WORKER, "cad.execution.completed",
+                                             stage="cad_execution",
+                                             message=f"Component {comp['name']} valid {v['facts']}")
+                            comp["status"] = "valid"; results.append(v); break
+                        c_reason = v["reason"]
+                c_repair += 1
+                await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
+                                 message=f"Component {comp['name']} repair "
+                                         f"{c_repair}/{config.CLAUDE_CODE_MAX_REPAIRS}: {str(c_reason)[:120]}")
+                if c_repair > config.CLAUDE_CODE_MAX_REPAIRS:
+                    comp["status"] = "invalid"
+                    results.append({"name": comp["name"], "step": comp["step"],
+                                    "valid": False, "reason": c_reason, "facts": None})
+                    # Attempt all remaining components before failing; break inner loop only.
                     break
-                repair_error = cad.get("error", "CAD execution failed")
-                await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="cad_execution",
-                                 message=f"CAD failed: {repair_error[:200]}")
-                attempt += 1
-                if attempt > config.CLAUDE_CODE_MAX_REPAIRS:
-                    await fail("CAD_EXECUTION", f"failed after {attempt - 1} repair(s): {repair_error}")
-                    return
+
+        report = component_validator.write_report(project_id, results)
+        await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
+                         message=f"Components validated: {report['passed']}/{report['total']}")
+        if report["passed"] < report["total"]:
+            bad = [r["name"] for r in results if not r["valid"]]
+            await fail("COMPONENT_VALIDATION", f"components failed validation: {bad}",
+                       status="FAILED_CAD")
+            return
+
+        # ---- 5-6. Deterministic assembly (no Claude) ----
+        if job:
+            job.stage = "ASSEMBLY_GENERATION"; job_service.save_job(job)
+        graph = assembly_graph.build_graph(manifest, design_spec)
+        placement_rules.resolve(graph, design_spec)
+        assembly_graph.write_graph(project_id, graph)
+        assembly_composer.write_source(project_id, graph)
+        code, err = _read_generate_py(project_id)
+        if code is None:
+            await fail("ASSEMBLY_GENERATION", err or "composer wrote no source",
+                       status="FAILED_CAD"); return
+        await ch.publish(SOURCE_WORKER, "cad.execution.started", stage="cad_execution",
+                         message=f"Composing assembly ({graph['node_count']} parts, "
+                                 f"{graph['placement_engine']})")
+        if job:
+            job.stage = "ASSEMBLY_EXECUTION"; job_service.save_job(job)
+        cad = await _run_cad_trusted(project_id, code)
+        if not cad["ok"]:
+            await fail("ASSEMBLY_EXECUTION", cad.get("error", "assembly CAD failed"),
+                       status="FAILED_CAD"); return
+        av = assembly_builder.validate_assembly(project_id, code, design_spec, graph=graph)
+        if not av["valid"]:
+            await fail("ASSEMBLY_VALIDATION", ", ".join(av["flags"]) or "assembly invalid",
+                       status="FAILED_CAD"); return
+        await ch.publish(SOURCE_WORKER, "cad.execution.completed", stage="cad_execution",
+                         message=f"Assembly valid (solids={av['solids']}, faces={av['faces']})")
 
         # ---- 9. artifacts + report ----
         if job:

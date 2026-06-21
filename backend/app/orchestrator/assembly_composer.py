@@ -2,7 +2,21 @@
 from __future__ import annotations
 from app.services import claude_code_adapter
 
-_HEADER = "from build123d import *\n\n\ndef gen_step():\n    parts = []\n"
+# Use OCC-level compound builder to avoid a build123d segfault when
+# Compound(children=[...]) is called on import_step() results inside the
+# cadpy step CLI execution context.
+_HEADER = (
+    "from build123d import *\n"
+    "from OCP.TopoDS import TopoDS_Builder, TopoDS_Compound\n"
+    "\n\n"
+    "def gen_step():\n"
+    "    parts = []\n"
+)
+_FOOTER = (
+    "    _b = TopoDS_Builder(); _c = TopoDS_Compound(); _b.MakeCompound(_c)\n"
+    "    for _s in parts: _b.Add(_c, _s.wrapped)\n"
+    "    return Compound(_c)\n"
+)
 
 
 def emit_source(project_id: str, graph: dict) -> str:
@@ -19,7 +33,7 @@ def emit_source(project_id: str, graph: dict) -> str:
             f"    _p.label = {node['id']!r}\n"
             f"    parts.append(_p)\n"
         )
-    lines.append("    return Compound(children=parts)\n")
+    lines.append(_FOOTER)
     return "".join(lines)
 
 
