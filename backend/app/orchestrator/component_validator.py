@@ -45,8 +45,10 @@ a clean, recognizable {comp['name']}.
 def repair_prompt(comp: dict, reason: str) -> str:
     return (
         f"\n\n--- REWRITE REQUIRED (component {comp['name']}) ---\n{reason}\n"
-        "Fix the smallest responsible part of the source so it produces a single "
-        "closed positive-volume solid, then it will be re-validated.\n"
+        "Use the Edit tool to change ONLY the failing line/section identified by "
+        "the error above. Do not rewrite the whole file. Do not execute or test. "
+        "Make the smallest fix that yields a single closed positive-volume solid; "
+        "the backend re-validates.\n"
     )
 
 

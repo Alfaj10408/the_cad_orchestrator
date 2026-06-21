@@ -46,3 +46,12 @@ def test_component_prompt_has_preflight_and_path():
     assert "no shell" in low
     assert "stop after" in low
     assert "def gen_step()" in p  # existing requirement preserved
+
+
+def test_repair_prompt_is_edit_targeted_and_carries_error():
+    r = cv.repair_prompt(_COMP, "NameError: name 'translate' is not defined")
+    low = r.lower()
+    assert "edit" in low
+    assert "smallest" in low or "only the failing" in low
+    assert "do not rewrite" in low or "do not execute" in low
+    assert "NameError: name 'translate' is not defined" in r  # exact error included
