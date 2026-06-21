@@ -16,7 +16,14 @@ from pathlib import Path
 
 from app.ai import cad_agent, work_order
 from app.core import config, paths
-from app.orchestrator import assembly_builder, component_planner, component_validator
+from app.orchestrator import (
+    assembly_builder,
+    assembly_composer,
+    assembly_graph,
+    component_planner,
+    component_validator,
+    placement_rules,
+)
 from app.schemas.events import (
     SOURCE_ARTIFACT,
     SOURCE_QWEN,
@@ -133,6 +140,23 @@ async def _run_cad(project_id: str, code: str) -> dict:
     return await asyncio.to_thread(_work)
 
 
+async def _run_cad_trusted(project_id: str, code: str) -> dict:
+    """Run CAD export pipeline for machine-generated source (skips safety check).
+
+    import_step is legitimate in composer output and must not be blocked.
+    """
+    def _work() -> dict:
+        cad_runner.generate_source_from_llm(project_id, code)
+        step = cad_runner.export_step(project_id)
+        if not step["ok"]:
+            return {"ok": False, "error": step.get("stderr") or "STEP export failed"}
+        cad_runner.export_meshes(project_id)
+        cad_runner.inspect_step(project_id)
+        cad_runner.generate_snapshot(project_id)
+        return {"ok": True}
+    return await asyncio.to_thread(_work)
+
+
 def _quality_gate(project_id: str, code: str, spec: dict) -> dict:
     """Post-generation detail check. Flags low_detail / primitive_box output."""
     size = len(code.encode("utf-8"))
@@ -184,9 +208,9 @@ async def run(project_id: str, job_id: str) -> None:
     ch = event_service.get_channel(project_id, job_id)
     job = job_service.get_job(job_id)
 
-    async def fail(stage: str, detail: str) -> None:
+    async def fail(stage: str, detail: str, status: str = "FAILED") -> None:
         if job:
-            job.status = "FAILED"
+            job.status = status
             job.stage = stage
             job.completed_at = _now()
             job_service.save_job(job)
@@ -254,7 +278,10 @@ async def run(project_id: str, job_id: str) -> None:
         )
 
         async def _claude_call(prompt: str) -> tuple[str, dict]:
-            """One Claude call. Returns (status, res); status: ok|fail|cancel."""
+            """One Claude call. Returns (status, res); status: ok|fail|cancel.
+
+            Also surfaces res['failure_class']: None | 'quota' | 'turns' | 'cad'.
+            """
             res = await claude_code_adapter.run_claude(project_id, job_id, prompt, ch)
             if res.get("error") == "cancelled" or job_id in claude_code_adapter._cancelled:
                 return "cancel", res
@@ -286,6 +313,18 @@ async def run(project_id: str, job_id: str) -> None:
                     if status == "cancel":
                         await _do_cancel(); return
                     if status == "fail":
+                        fc = res.get("failure_class")
+                        if fc == "quota":
+                            await fail("COMPONENT_GENERATION",
+                                       res.get("error") or "quota limit reached",
+                                       status="FAILED_QUOTA")
+                            return
+                        if fc == "turns":
+                            await fail("COMPONENT_GENERATION",
+                                       res.get("error") or "max turns reached",
+                                       status="FAILED_TURNS")
+                            return
+                        # fc == "cad" or None — enter/continue repair loop
                         c_reason = res.get("error") or "Claude failed"
                     else:
                         cpath = claude_code_adapter.safe_workspace_path(
@@ -313,7 +352,10 @@ async def run(project_id: str, job_id: str) -> None:
                         comp["status"] = "invalid"
                         results.append({"name": comp["name"], "step": comp["step"],
                                         "valid": False, "reason": c_reason, "facts": None})
-                        break
+                        await fail("COMPONENT_GENERATION",
+                                   f"component {comp['name']} exhausted repairs: {c_reason}",
+                                   status="FAILED_CAD")
+                        return
 
             report = component_validator.write_report(project_id, results)
             await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
@@ -323,48 +365,32 @@ async def run(project_id: str, job_id: str) -> None:
                 await fail("COMPONENT_VALIDATION", f"components failed validation: {bad}")
                 return
 
-            # ---- 5-6. Assembly generation + validation ----
+            # ---- 5-6. Deterministic assembly (no Claude) ----
             if job:
                 job.stage = "ASSEMBLY_GENERATION"; job_service.save_job(job)
-            a_reason: str | None = None
-            a_repair = 0
-            while True:
-                aprompt = assembly_builder.assembly_prompt(design_spec, manifest, report)
-                if a_reason:
-                    aprompt += assembly_builder.repair_prompt(a_reason)
-                status, res = await _claude_call(aprompt)
-                if status == "cancel":
-                    await _do_cancel(); return
-                if status == "fail":
-                    a_reason = res.get("error") or "Claude failed"
-                else:
-                    code, err = _read_generate_py(project_id)
-                    if code is None:
-                        a_reason = err or "missing assembly source"
-                    else:
-                        await ch.publish(SOURCE_WORKER, "cad.execution.started",
-                                         stage="cad_execution", message="Executing assembly")
-                        if job:
-                            job.stage = "ASSEMBLY_EXECUTION"; job_service.save_job(job)
-                        cad = await _run_cad(project_id, code)
-                        if not cad["ok"]:
-                            a_reason = cad.get("error", "assembly CAD execution failed")
-                        else:
-                            av = assembly_builder.validate_assembly(project_id, code, design_spec)
-                            if av["valid"]:
-                                await ch.publish(SOURCE_WORKER, "cad.execution.completed",
-                                                 stage="cad_execution",
-                                                 message=f"Assembly valid (solids={av['solids']}, "
-                                                         f"faces={av['faces']})")
-                                break
-                            a_reason = ", ".join(av["flags"]) or "assembly invalid"
-                a_repair += 1
-                await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
-                                 message=f"Assembly repair {a_repair}/{config.CLAUDE_CODE_MAX_REPAIRS}: "
-                                         f"{str(a_reason)[:140]}")
-                if a_repair > config.CLAUDE_CODE_MAX_REPAIRS:
-                    await fail("ASSEMBLY_VALIDATION", f"assembly invalid: {a_reason}")
-                    return
+            graph = assembly_graph.build_graph(manifest, design_spec)
+            placement_rules.resolve(graph, design_spec)
+            assembly_graph.write_graph(project_id, graph)
+            assembly_composer.write_source(project_id, graph)
+            code, err = _read_generate_py(project_id)
+            if code is None:
+                await fail("ASSEMBLY_GENERATION", err or "composer wrote no source",
+                           status="FAILED_CAD"); return
+            await ch.publish(SOURCE_WORKER, "cad.execution.started", stage="cad_execution",
+                             message=f"Composing assembly ({graph['node_count']} parts, "
+                                     f"{graph['placement_engine']})")
+            if job:
+                job.stage = "ASSEMBLY_EXECUTION"; job_service.save_job(job)
+            cad = await _run_cad_trusted(project_id, code)
+            if not cad["ok"]:
+                await fail("ASSEMBLY_EXECUTION", cad.get("error", "assembly CAD failed"),
+                           status="FAILED_CAD"); return
+            av = assembly_builder.validate_assembly(project_id, code, design_spec, graph=graph)
+            if not av["valid"]:
+                await fail("ASSEMBLY_VALIDATION", ", ".join(av["flags"]) or "assembly invalid",
+                           status="FAILED_CAD"); return
+            await ch.publish(SOURCE_WORKER, "cad.execution.completed", stage="cad_execution",
+                             message=f"Assembly valid (solids={av['solids']}, faces={av['faces']})")
 
         else:
             # ---- Single-shot path (simple parts) — unchanged behavior ----
