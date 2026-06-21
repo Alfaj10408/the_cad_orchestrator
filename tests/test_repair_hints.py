@@ -34,3 +34,16 @@ def test_unknown_error_no_hint():
 
 def test_repair_hint_unknown_returns_empty():
     assert cv._repair_hint("totally unrelated message") == ""
+
+def test_typeerror_unexpected_keyword_hint():
+    low = cv.repair_prompt(_COMP, "TypeError: BuildSketch.__init__() got an unexpected keyword argument 'origin'").lower()
+    assert "signature" in low and "buildsketch" in low
+    assert "unexpected keyword argument 'origin'" in cv.repair_prompt(_COMP, "TypeError: ... unexpected keyword argument 'origin'") or "origin=" in low
+
+def test_positional_argument_hint():
+    low = cv.repair_prompt(_COMP, "TypeError: foo() takes 2 positional arguments but 3 were given").lower()
+    assert "api/signature" in low or "signature" in low
+
+def test_nameerror_still_matches_api():
+    low = cv.repair_prompt(_COMP, "NameError: name 'translate' is not defined").lower()
+    assert "translate()" in low and ("location" in low or "signature" in low)

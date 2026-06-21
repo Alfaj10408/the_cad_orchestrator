@@ -52,10 +52,15 @@ def _repair_hint(reason: str) -> str:
                 "on those edges.\n")
     if "chamfer" in r:
         return "\nHINT: the chamfer length is too large. Reduce it or remove the chamfer.\n"
-    if "not defined" in r or "nameerror" in r or "attributeerror" in r:
-        return ("\nHINT: use valid build123d API only — move solids with .moved(Location(...)) "
-                "or Pos(...), place sketch geometry with Locations(...); do not call translate() "
-                "or any undefined name.\n")
+    if ("not defined" in r or "nameerror" in r or "attributeerror" in r
+            or "typeerror" in r or "unexpected keyword" in r
+            or "positional argument" in r):
+        return ("\nHINT: build123d API/signature error. Use only valid build123d calls with "
+                "correct signatures: BuildSketch takes plane(s) positionally "
+                "(e.g. `BuildSketch(Plane.XY)`); place sketch geometry with `Locations(...)`/"
+                "`Pos(...)`; position solids with `.moved(Location(...))`. Do NOT pass keyword "
+                "args the constructor rejects (e.g. `origin=`, `center=`), and do not call "
+                "undefined names (e.g. `translate()`). Fix the call to match the real API.\n")
     if "degenerate" in r or "no solid" in r or "empty" in r:
         return ("\nHINT: the result has no positive-volume solid. Ensure boolean ops do not "
                 "remove all material and that all dimensions are > 0.\n")
