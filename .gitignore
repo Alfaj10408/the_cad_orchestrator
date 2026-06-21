@@ -1,0 +1,18 @@
+# generated artifacts / data
+storage/
+runs/
+logs/
+outputs/
+output.txt
+repo/
+inputs/
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+# node / frontend build
+node_modules/
+frontend/node_modules/
+frontend/dist/
+# sdd scratch
+.superpowers/

@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+anthropic>=0.40  # optional; only needed for generation_mode=llm
+httpx>=0.27  # orchestrator client -> local Qwen vLLM server
