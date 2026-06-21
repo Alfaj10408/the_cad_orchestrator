@@ -78,6 +78,12 @@ def repair_prompt(comp: dict, reason: str) -> str:
     )
 
 
+def _is_crash_exit(returncode) -> bool:
+    """True for signal/crash-class exits (Python signals are negative; shells
+    report 128+signal). Ordinary nonzero tool errors are NOT crash-class."""
+    return returncode is not None and (returncode < 0 or returncode >= 128)
+
+
 def run_component(project_id: str, comp: dict, code: str) -> dict:
     """Write + STEP-export + inspect one component. Returns exec facts."""
     ok, safety = llm_cad_generator.check_code_safety(code)
@@ -91,7 +97,12 @@ def run_component(project_id: str, comp: dict, code: str) -> dict:
     (ws / src_rel).write_text(code)
 
     step = cad_runner._run(cad_runner.STEP_TOOL, [f"{src_rel}={step_rel}"], cwd=ws)
-    if step.returncode != 0 or not (ws / step_rel).exists():
+    step_exists = (ws / step_rel).exists()
+    crash = _is_crash_exit(step.returncode)
+    # Geometry is the source of truth: a crash-class exit (e.g. a post-export
+    # SIGSEGV in GLB/cleanup) is tolerated IF a STEP was produced and inspects
+    # to a valid solid. Ordinary nonzero exits and missing STEPs still fail.
+    if not step_exists or (step.returncode != 0 and not crash):
         return {"ok": False, "reason": (step.stderr or "STEP export failed")[-800:], "facts": None}
 
     ref = step_rel.rsplit(".", 1)[0]
@@ -103,6 +114,10 @@ def run_component(project_id: str, comp: dict, code: str) -> dict:
         facts = json.loads(insp.stdout)["tokens"][0]["summary"]
     except Exception:  # noqa: BLE001
         pass
+    if crash and facts is None:
+        return {"ok": False,
+                "reason": f"STEP export crashed (rc={step.returncode}) and produced no inspectable solid",
+                "facts": None}
     return {"ok": True, "reason": None, "facts": facts}
 
 
