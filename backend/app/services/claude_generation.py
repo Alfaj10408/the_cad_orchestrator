@@ -141,9 +141,11 @@ async def _run_cad(project_id: str, code: str) -> dict:
 
 
 async def _run_cad_trusted(project_id: str, code: str) -> dict:
-    """Run CAD export pipeline for machine-generated source (skips safety check).
+    """Run CAD export pipeline for machine-generated source.
 
-    import_step is legitimate in composer output and must not be blocked.
+    Returns only ``{"ok": bool, "error"?: str}`` — no step/meshes/insp/snap sub-keys.
+    Skips check_code_safety because the source is machine-generated/trusted
+    (import_step is legitimate in composer output and must not be blocked).
     """
     def _work() -> dict:
         cad_runner.generate_source_from_llm(project_id, code)
@@ -352,17 +354,16 @@ async def run(project_id: str, job_id: str) -> None:
                         comp["status"] = "invalid"
                         results.append({"name": comp["name"], "step": comp["step"],
                                         "valid": False, "reason": c_reason, "facts": None})
-                        await fail("COMPONENT_GENERATION",
-                                   f"component {comp['name']} exhausted repairs: {c_reason}",
-                                   status="FAILED_CAD")
-                        return
+                        # Attempt all remaining components before failing; break inner loop only.
+                        break
 
             report = component_validator.write_report(project_id, results)
             await ch.publish(SOURCE_WORKER, "cad.execution.log", stage="validation",
                              message=f"Components validated: {report['passed']}/{report['total']}")
             if report["passed"] < report["total"]:
                 bad = [r["name"] for r in results if not r["valid"]]
-                await fail("COMPONENT_VALIDATION", f"components failed validation: {bad}")
+                await fail("COMPONENT_VALIDATION", f"components failed validation: {bad}",
+                           status="FAILED_CAD")
                 return
 
             # ---- 5-6. Deterministic assembly (no Claude) ----

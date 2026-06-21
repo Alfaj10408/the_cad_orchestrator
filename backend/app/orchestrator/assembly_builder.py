@@ -34,6 +34,7 @@ def validate_assembly(project_id: str, code: str, design_spec: dict,
     expected_nodes = None
     if graph is not None:
         expected_nodes = graph.get("node_count")
+        # >= : merged/extra solids are acceptable; fewer than the graph's nodes is a failure
         node_count_ok = (solids or 0) >= (expected_nodes or 0)
         if not node_count_ok:
             flags.append("node_count_mismatch")
@@ -42,6 +43,7 @@ def validate_assembly(project_id: str, code: str, design_spec: dict,
         if env and mn and mx:
             dims = [mx[i] - mn[i] for i in range(3)]
             lim = [1.5 * env.get(k, 0) for k in ("x", "y", "z")]
+            # envelope axis missing/0 → treat that axis as unconstrained
             bbox_within_envelope = all(dims[i] <= lim[i] or lim[i] == 0 for i in range(3))
             if not bbox_within_envelope:
                 flags.append("bbox_exceeds_envelope")

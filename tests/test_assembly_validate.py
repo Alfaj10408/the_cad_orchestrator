@@ -36,3 +36,16 @@ def test_valid_assembly_passes():
     graph = {"node_count": 5}
     r = assembly_builder.validate_assembly(pid, "x" * 2000, SPEC, graph=graph)
     assert r["valid"] is True and r["node_count_ok"] and r["bbox_within_envelope"]
+
+
+def test_bbox_exceeds_envelope_fails():
+    """Assembly whose x-span (800 mm) exceeds 1.5× envelope x (375 mm) must fail."""
+    pid = "valasm_t3"
+    # solid count matches graph node count so ONLY the bbox check should fail
+    _write_insp(pid, solids=5, faces=100, edges=300,
+                bounds={"min": [-400, -90, 0], "max": [400, 90, 100]})
+    graph = {"node_count": 5}
+    r = assembly_builder.validate_assembly(pid, "x" * 2000, SPEC, graph=graph)
+    assert r["bbox_within_envelope"] is False
+    assert "bbox_exceeds_envelope" in r["flags"]
+    assert r["valid"] is False
