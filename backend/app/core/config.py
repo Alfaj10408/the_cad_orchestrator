@@ -46,6 +46,11 @@ CLAUDE_CODE_TIMEOUT_SECONDS = int(os.environ.get("CLAUDE_CODE_TIMEOUT_SECONDS", 
 CLAUDE_CODE_PERMISSION_MODE = os.environ.get("CLAUDE_CODE_PERMISSION_MODE", "acceptEdits")
 # Tools Claude may use inside its sandboxed workspace (fixed; never from browser).
 CLAUDE_CODE_TOOLS = os.environ.get("CLAUDE_CODE_TOOLS", "Read,Write,Edit,Bash")
+# Component-generation overrides (turn robustness). No Bash: backend owns
+# STEP export/inspection, so component calls only Read/Write/Edit.
+CLAUDE_CODE_COMPONENT_TOOLS = os.environ.get("CLAUDE_CODE_COMPONENT_TOOLS", "Read,Write,Edit")
+CLAUDE_CODE_COMPONENT_MAX_TURNS = int(os.environ.get("CLAUDE_CODE_COMPONENT_MAX_TURNS", "8"))
+CLAUDE_CODE_COMPONENT_NEAR_CAP = int(os.environ.get("CLAUDE_CODE_COMPONENT_NEAR_CAP", "6"))
 # Workspace root for per-job Claude runs.
 CLAUDE_CODE_WORKSPACE_ROOT = Path(
     os.environ.get("CLAUDE_CODE_WORKSPACE_ROOT", PRODUCT_ROOT / "runs")
