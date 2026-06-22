@@ -17,6 +17,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "PROJECTS_ROOT", tmp_path / "projects")
     (tmp_path / "projects").mkdir()
     monkeypatch.setattr(cfg, "ADMIN_API_KEY", "admin-secret")
+    monkeypatch.setattr(cfg, "API_RETENTION_ENABLED", True)
     c = db.connect(str(tmp_path / "r.db")); db.init_db(c)
     uid = db.create_user(c, "u1")
     key, _pfx, _kid, _uid = auth.mint_key(c, "u1")  # returns (key, prefix, kid, user_id)
