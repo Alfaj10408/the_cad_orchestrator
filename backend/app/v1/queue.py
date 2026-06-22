@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio, json
 from datetime import datetime, timezone
-from app.core import config, paths
+from app.core import config
 from app.services import claude_generation, job_service
 from app.v1 import db
 
@@ -13,9 +13,15 @@ _TERMINAL = {"COMPLETED": ("completed", None),
 def _now(): return datetime.now(timezone.utc).isoformat()
 
 def _load_metrics(project_id):
-    p = paths.project_dir(project_id) / "reports" / "component_metrics.json"
+    p = config.PROJECTS_ROOT / project_id / "reports" / "component_metrics.json"
     try: return p.read_text()
     except Exception: return None
+
+def _terminal(conn, job_id, project_id, status, failure_class=None, stage=None):
+    """Single terminal write: always capture metrics_json + failure_class."""
+    db.update_job(conn, job_id, status=status, failure_class=failure_class,
+                  stage=stage, completed_at=_now(),
+                  metrics_json=_load_metrics(project_id))
 
 class JobQueue:
     def __init__(self, db_path: str | None = None):
@@ -54,8 +60,8 @@ class JobQueue:
         conn = db.connect(self.db_path)
         try:
             for r in db.list_running_jobs(conn):
-                db.update_job(conn, r["job_id"], status="failed", failure_class="internal",
-                              completed_at=_now())
+                _terminal(conn, r["job_id"], r["project_id"], "failed",
+                          failure_class="internal")
             for r in db.list_pending_jobs(conn):
                 self._q.put_nowait(r["job_id"])
         finally:
@@ -73,17 +79,16 @@ class JobQueue:
                     claude_generation.run(row["project_id"], job_id),
                     timeout=config.JOB_WALLCLOCK_TIMEOUT)
             except asyncio.TimeoutError:
-                db.update_job(self._conn, job_id, status="failed", failure_class="cad",
-                              completed_at=_now()); continue
+                _terminal(self._conn, job_id, row["project_id"], "failed",
+                          failure_class="cad"); continue
             except Exception:  # noqa: BLE001
-                db.update_job(self._conn, job_id, status="failed", failure_class="internal",
-                              completed_at=_now()); continue
+                _terminal(self._conn, job_id, row["project_id"], "failed",
+                          failure_class="internal"); continue
             current = db.get_job_row(self._conn, job_id)
             if current is not None and current["status"] == "cancelled":
-                continue  # user cancelled mid-run; do not overwrite
+                _terminal(self._conn, job_id, row["project_id"], "cancelled"); continue
             j = job_service.get_job(job_id)
             status = getattr(j, "status", "FAILED_CAD")
             mapped, fclass = _TERMINAL.get(status, ("failed", "internal"))
-            db.update_job(self._conn, job_id, status=mapped, failure_class=fclass,
-                          stage=getattr(j, "stage", None), completed_at=_now(),
-                          metrics_json=_load_metrics(row["project_id"]))
+            _terminal(self._conn, job_id, row["project_id"], mapped,
+                      failure_class=fclass, stage=getattr(j, "stage", None))
