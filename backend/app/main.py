@@ -1,6 +1,7 @@
 """FastAPI application entrypoint (MVP v1 skeleton)."""
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
     artifacts,
@@ -15,7 +16,7 @@ from app.api import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from app.core.config import API_PREFIX, APP_TITLE, APP_VERSION, PRODUCT_ROOT
+from app.core.config import API_PREFIX, APP_TITLE, APP_VERSION, PRODUCT_ROOT, V1_CORS_ORIGINS
 from app.services import claude_code_adapter
 from app.v1 import db as v1db, routes as v1routes
 from app.v1.queue import JobQueue
@@ -35,6 +36,15 @@ async def _lifespan(app):
 
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION, lifespan=_lifespan)
+
+if V1_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=V1_CORS_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
 
 app.include_router(health.router, prefix=API_PREFIX)
 app.include_router(projects.router, prefix=API_PREFIX)
