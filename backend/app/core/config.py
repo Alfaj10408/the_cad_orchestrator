@@ -64,3 +64,11 @@ CLAUDE_CODE_MAX_OUTPUT_BYTES = int(
 )
 # Max Claude repair attempts after a failed CAD execution.
 CLAUDE_CODE_MAX_REPAIRS = int(os.environ.get("CLAUDE_CODE_MAX_REPAIRS", "2"))
+
+# ---------- /v1 production API ----------
+API_DB_PATH = os.environ.get("API_DB_PATH", str(STORAGE_ROOT / "api.db"))
+ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+API_KEY_SALT = os.environ.get("API_KEY_SALT", "dev-salt-change-me")
+API_MAX_QUEUE_DEPTH = int(os.environ.get("API_MAX_QUEUE_DEPTH", "32"))
+JOB_WALLCLOCK_TIMEOUT = int(os.environ.get("JOB_WALLCLOCK_TIMEOUT", "5400"))
+V1_CORS_ORIGINS = [o for o in os.environ.get("V1_CORS_ORIGINS", "").split(",") if o]

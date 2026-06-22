@@ -1,0 +1,70 @@
+"""SQLite index for the /v1 API (users, api_keys, jobs). WAL; stdlib sqlite3."""
+from __future__ import annotations
+import sqlite3, uuid
+from datetime import datetime, timezone
+from app.core import config
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def connect(path: str | None = None) -> sqlite3.Connection:
+    conn = sqlite3.connect(path or config.API_DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS users(
+      id TEXT PRIMARY KEY, name TEXT, is_admin INTEGER DEFAULT 0, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS api_keys(
+      id TEXT PRIMARY KEY, user_id TEXT, key_hash TEXT UNIQUE, key_prefix TEXT,
+      created_at TEXT, revoked_at TEXT);
+    CREATE TABLE IF NOT EXISTS jobs(
+      job_id TEXT PRIMARY KEY, user_id TEXT, project_id TEXT, status TEXT, stage TEXT,
+      failure_class TEXT, created_at TEXT, started_at TEXT, completed_at TEXT,
+      queue_pos INTEGER, metrics_json TEXT);
+    """)
+    conn.commit()
+
+def create_user(conn, name, is_admin=False) -> str:
+    uid = uuid.uuid4().hex
+    conn.execute("INSERT INTO users(id,name,is_admin,created_at) VALUES(?,?,?,?)",
+                 (uid, name, 1 if is_admin else 0, _now())); conn.commit()
+    return uid
+
+def create_api_key(conn, user_id, key_hash, key_prefix) -> str:
+    kid = uuid.uuid4().hex
+    conn.execute("INSERT INTO api_keys(id,user_id,key_hash,key_prefix,created_at) VALUES(?,?,?,?,?)",
+                 (kid, user_id, key_hash, key_prefix, _now())); conn.commit()
+    return kid
+
+def get_user(conn, user_id):
+    return conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+
+def get_key_by_hash(conn, key_hash):
+    return conn.execute(
+        "SELECT * FROM api_keys WHERE key_hash=? AND revoked_at IS NULL", (key_hash,)).fetchone()
+
+def revoke_key(conn, key_id) -> None:
+    conn.execute("UPDATE api_keys SET revoked_at=? WHERE id=?", (_now(), key_id)); conn.commit()
+
+def insert_job(conn, job_id, user_id, project_id, status="pending", queue_pos=None) -> None:
+    conn.execute("INSERT INTO jobs(job_id,user_id,project_id,status,created_at,queue_pos) "
+                 "VALUES(?,?,?,?,?,?)", (job_id, user_id, project_id, status, _now(), queue_pos))
+    conn.commit()
+
+def update_job(conn, job_id, **fields) -> None:
+    if not fields: return
+    cols = ",".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE jobs SET {cols} WHERE job_id=?", (*fields.values(), job_id)); conn.commit()
+
+def get_job_row(conn, job_id):
+    return conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+
+def list_pending_jobs(conn):
+    return conn.execute("SELECT * FROM jobs WHERE status='pending' ORDER BY created_at").fetchall()
+
+def list_running_jobs(conn):
+    return conn.execute("SELECT * FROM jobs WHERE status='running'").fetchall()
