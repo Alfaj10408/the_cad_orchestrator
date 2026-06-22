@@ -89,6 +89,15 @@ curl -sN $B/projects/$PID/jobs/$JOB/events      # live normalized SSE
 curl -s $B/projects/$PID/artifacts              # after completion
 ```
 
+## Validated config (2026-06-22 — 10/10 benchmark)
+Defaults below are baked in (env-overridable); the start commands above need no
+extra flags. See `PROJECT_MILESTONE_2026_06_22.md` / `benchmark_summary.md`.
+- Component generation: `CLAUDE_CODE_COMPONENT_TOOLS=Read,Write,Edit` (no Bash),
+  `CLAUDE_CODE_COMPONENT_MAX_TURNS=12`, `CLAUDE_CODE_COMPONENT_NEAR_CAP=8`.
+- Assembly is deterministic (zero Claude calls); per-component metrics in
+  `reports/component_metrics.json`; assembly graph in `reports/assembly_graph.json`.
+- Benchmark harnesses (capability runs) live in the session scratchpad, not the repo.
+
 ## Known limitations
 - One `qwen_claude_code` run takes a few minutes — dominated by global Claude
   Code SessionStart hooks/plugins (model API time is only seconds).
