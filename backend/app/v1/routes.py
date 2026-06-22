@@ -253,6 +253,27 @@ def admin_failures(limit: int | None = None, _: bool = Depends(auth.require_admi
         conn, limit if limit is not None else config.API_FAILURES_RECENT_LIMIT)
     return {"counts": counts, "recent": recent}
 
+@router.get("/admin/claims")
+def admin_claims(_: bool = Depends(auth.require_admin), conn=Depends(db.get_conn)):
+    # NOTE: idle workers holding no running job do NOT appear here.
+    # `claimed_by` proves a held claim, not a live process.
+    now = datetime.now(timezone.utc).isoformat()
+    rows = db.active_claims(conn)
+    claims = []
+    owners: dict = {}
+    for r in rows:
+        le = r["lease_expires_at"]
+        stale = le is not None and le < now
+        claims.append({"claimed_by": r["claimed_by"], "job_id": r["job_id"],
+                       "status": r["status"], "claimed_at": r["claimed_at"],
+                       "lease_expires_at": le, "stale": stale})
+        o = owners.setdefault(r["claimed_by"], {"claimed_by": r["claimed_by"],
+                                                "running": 0, "oldest_lease": le})
+        o["running"] += 1
+        if le is not None and (o["oldest_lease"] is None or le < o["oldest_lease"]):
+            o["oldest_lease"] = le
+    return {"claims": claims, "by_owner": list(owners.values()), "now": now}
+
 @router.delete("/admin/users/{target_user_id}/quota")
 def admin_clear_quota(target_user_id: str,
                       _: bool = Depends(auth.require_admin), conn=Depends(db.get_conn)):

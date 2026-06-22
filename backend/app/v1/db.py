@@ -175,6 +175,14 @@ def set_quota(conn, user_id, daily_job_limit, max_in_flight):
 def clear_quota(conn, user_id):
     conn.execute("DELETE FROM user_quota WHERE user_id=?", (user_id,)); conn.commit()
 
+def active_claims(conn):
+    """Running jobs with claim metadata (claim view; read-only).
+    NOTE: idle workers holding no running job do NOT appear here.
+    `claimed_by` proves a held claim, not a live process."""
+    return conn.execute(
+        "SELECT job_id, claimed_by, status, claimed_at, lease_expires_at "
+        "FROM jobs WHERE status='running' ORDER BY claimed_at").fetchall()
+
 def failure_summary(conn, limit: int = 50):
     """(counts by failure_class, recent failed/cancelled jobs). Read-only."""
     counts = {}
