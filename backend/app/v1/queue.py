@@ -18,13 +18,15 @@ def _load_metrics(project_id):
     except Exception: return None
 
 class JobQueue:
-    def __init__(self, conn):
-        self.conn = conn
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path or config.API_DB_PATH
         self._q: asyncio.Queue[str] = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        self._conn = None
 
     def start(self):
         if self._task is None:
+            self._conn = db.connect(self.db_path)
             self._task = asyncio.create_task(self._worker())
 
     async def stop(self):
@@ -33,6 +35,8 @@ class JobQueue:
             try: await self._task
             except asyncio.CancelledError: pass
             self._task = None
+        if self._conn is not None:
+            self._conn.close(); self._conn = None
 
     def depth(self) -> int:
         return self._q.qsize()
@@ -46,37 +50,40 @@ class JobQueue:
         self._q.put_nowait(job_id)
         return self._q.qsize()
 
-    def recover(self, conn):
-        # running jobs with no live worker (post-restart) -> failed/internal
-        for r in db.list_running_jobs(conn):
-            db.update_job(conn, r["job_id"], status="failed", failure_class="internal",
-                          completed_at=_now())
-        for r in db.list_pending_jobs(conn):
-            self._q.put_nowait(r["job_id"])
+    def recover(self):
+        conn = db.connect(self.db_path)
+        try:
+            for r in db.list_running_jobs(conn):
+                db.update_job(conn, r["job_id"], status="failed", failure_class="internal",
+                              completed_at=_now())
+            for r in db.list_pending_jobs(conn):
+                self._q.put_nowait(r["job_id"])
+        finally:
+            conn.close()
 
     async def _worker(self):
         while True:
             job_id = await self._q.get()
-            row = db.get_job_row(self.conn, job_id)
+            row = db.get_job_row(self._conn, job_id)
             if row is None or row["status"] != "pending":
                 continue
-            db.update_job(self.conn, job_id, status="running", started_at=_now())
+            db.update_job(self._conn, job_id, status="running", started_at=_now())
             try:
                 await asyncio.wait_for(
                     claude_generation.run(row["project_id"], job_id),
                     timeout=config.JOB_WALLCLOCK_TIMEOUT)
             except asyncio.TimeoutError:
-                db.update_job(self.conn, job_id, status="failed", failure_class="cad",
+                db.update_job(self._conn, job_id, status="failed", failure_class="cad",
                               completed_at=_now()); continue
             except Exception:  # noqa: BLE001
-                db.update_job(self.conn, job_id, status="failed", failure_class="internal",
+                db.update_job(self._conn, job_id, status="failed", failure_class="internal",
                               completed_at=_now()); continue
-            current = db.get_job_row(self.conn, job_id)
+            current = db.get_job_row(self._conn, job_id)
             if current is not None and current["status"] == "cancelled":
                 continue  # user cancelled mid-run; do not overwrite
             j = job_service.get_job(job_id)
             status = getattr(j, "status", "FAILED_CAD")
             mapped, fclass = _TERMINAL.get(status, ("failed", "internal"))
-            db.update_job(self.conn, job_id, status=mapped, failure_class=fclass,
+            db.update_job(self._conn, job_id, status=mapped, failure_class=fclass,
                           stage=getattr(j, "stage", None), completed_at=_now(),
                           metrics_json=_load_metrics(row["project_id"]))
