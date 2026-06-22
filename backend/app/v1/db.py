@@ -80,3 +80,15 @@ def list_pending_jobs(conn):
 
 def list_running_jobs(conn):
     return conn.execute("SELECT * FROM jobs WHERE status='running'").fetchall()
+
+def pending_position(conn, job_id):
+    """1-based rank of job_id among status='pending' rows by (created_at, job_id);
+    None if the job is missing or not pending."""
+    row = conn.execute(
+        "SELECT created_at, status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+    if row is None or row["status"] != "pending":
+        return None
+    return conn.execute(
+        "SELECT COUNT(*) AS c FROM jobs WHERE status='pending' "
+        "AND (created_at < ? OR (created_at = ? AND job_id <= ?))",
+        (row["created_at"], row["created_at"], job_id)).fetchone()["c"]
