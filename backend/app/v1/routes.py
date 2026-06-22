@@ -3,6 +3,7 @@ from __future__ import annotations
 import json, uuid
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from app.core import config, paths
 from app.services import job_service, artifact_service, claude_code_adapter
 from app.v1 import auth, db
@@ -118,3 +119,16 @@ def readyz(request: Request):
     checks["worker"] = bool(getattr(q, "alive", lambda: True)())
     ready = all(checks.values())
     return {"ready": ready, "checks": checks}
+
+class _KeyReq(BaseModel):
+    user_name: str
+
+@router.post("/admin/keys", status_code=201)
+def admin_mint_key(body: _KeyReq, request: Request, _: bool = Depends(auth.require_admin)):
+    key, prefix, kid, uid = auth.mint_key(_conn(request), body.user_name)
+    return {"key": key, "key_prefix": prefix, "key_id": kid, "user_id": uid}
+
+@router.delete("/admin/keys/{key_id}")
+def admin_revoke_key(key_id: str, request: Request, _: bool = Depends(auth.require_admin)):
+    db.revoke_key(_conn(request), key_id)
+    return {"revoked": key_id}
