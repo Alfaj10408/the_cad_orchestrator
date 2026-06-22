@@ -35,6 +35,9 @@ def _build_app(tmp_path, monkeypatch):
     # Patch config so db.connect() (which reads config.API_DB_PATH at call
     # time) and auth/routes see the tmp path.
     monkeypatch.setattr(_config, "API_DB_PATH", db_path)
+    # Disable quota for this test (concurrency test, not quota test).
+    # Routes read app.core.config.API_QUOTA_ENABLED at request time.
+    monkeypatch.setattr(_config, "API_QUOTA_ENABLED", False)
     import app.v1.db as _db_mod
     monkeypatch.setattr(_db_mod.config, "API_DB_PATH", db_path)
 

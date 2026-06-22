@@ -8,6 +8,8 @@ def _reload(origins):
     """Reload config and main with V1_CORS_ORIGINS set or unset."""
     if origins is None: os.environ.pop("V1_CORS_ORIGINS", None)
     else: os.environ["V1_CORS_ORIGINS"] = origins
+    # F9 startup guard: set non-default API_KEY_SALT before reload when ADMIN_API_KEY is set
+    os.environ["API_KEY_SALT"] = "test-cors-salt"
     from app.core import config as cfg; importlib.reload(cfg)
     from app import main as m; importlib.reload(m)
     return m
