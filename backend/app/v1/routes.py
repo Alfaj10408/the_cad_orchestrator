@@ -237,6 +237,13 @@ def admin_set_quota(target_user_id: str, body: _QuotaReq,
     return {"user_id": target_user_id, "daily_job_limit": body.daily_job_limit,
             "max_in_flight": body.max_in_flight}
 
+@router.get("/admin/jobs/failures")
+def admin_failures(limit: int | None = None, _: bool = Depends(auth.require_admin),
+                   conn=Depends(db.get_conn)):
+    counts, recent = db.failure_summary(
+        conn, limit if limit is not None else config.API_FAILURES_RECENT_LIMIT)
+    return {"counts": counts, "recent": recent}
+
 @router.delete("/admin/users/{target_user_id}/quota")
 def admin_clear_quota(target_user_id: str,
                       _: bool = Depends(auth.require_admin), conn=Depends(db.get_conn)):

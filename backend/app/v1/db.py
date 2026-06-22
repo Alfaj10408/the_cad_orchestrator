@@ -122,3 +122,18 @@ def set_quota(conn, user_id, daily_job_limit, max_in_flight):
 
 def clear_quota(conn, user_id):
     conn.execute("DELETE FROM user_quota WHERE user_id=?", (user_id,)); conn.commit()
+
+def failure_summary(conn, limit: int = 50):
+    """(counts by failure_class, recent failed/cancelled jobs). Read-only."""
+    counts = {}
+    for r in conn.execute(
+            "SELECT COALESCE(failure_class,'none') AS fc, COUNT(*) AS n "
+            "FROM jobs WHERE status IN ('failed','cancelled') GROUP BY fc").fetchall():
+        counts[r["fc"]] = r["n"]
+    recent = [dict(job_id=r["job_id"], status=r["status"],
+                   failure_class=r["failure_class"], completed_at=r["completed_at"])
+              for r in conn.execute(
+                  "SELECT job_id, status, failure_class, completed_at FROM jobs "
+                  "WHERE status IN ('failed','cancelled') "
+                  "ORDER BY completed_at DESC LIMIT ?", (int(limit),)).fetchall()]
+    return counts, recent
