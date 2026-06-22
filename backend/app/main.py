@@ -16,6 +16,7 @@ from app.api import (
 )
 from fastapi.staticfiles import StaticFiles
 
+from app.core import config
 from app.core.config import API_PREFIX, APP_TITLE, APP_VERSION, PRODUCT_ROOT, V1_CORS_ORIGINS
 from app.services import claude_code_adapter
 from app.v1 import db as v1db, routes as v1routes
@@ -24,6 +25,10 @@ from app.v1.queue import JobQueue
 
 @asynccontextmanager
 async def _lifespan(app):
+    if config.API_KEY_SALT == "dev-salt-change-me" and config.ADMIN_API_KEY:
+        raise RuntimeError(
+            "API_KEY_SALT is the default in a production deployment (ADMIN_API_KEY is set). "
+            "Set a strong API_KEY_SALT.")
     c = v1db.connect(); v1db.init_db(c); c.close()
     q = JobQueue()                      # reads config.API_DB_PATH
     q.recover(); q.start()

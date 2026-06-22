@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 : "${ADMIN_API_KEY:?set ADMIN_API_KEY}"
+: "${API_KEY_SALT:?set API_KEY_SALT (non-default) for production}"
 export GENERATION_PROVIDER="${GENERATION_PROVIDER:-qwen_claude_code}"
 export CLAUDE_CODE_ENABLED="${CLAUDE_CODE_ENABLED:-1}"
 export ORCH_BASE_URL="${ORCH_BASE_URL:-http://127.0.0.1:8001/v1}"
