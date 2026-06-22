@@ -12,8 +12,8 @@
 - Engine frozen: **never** modify `backend/app/services` or `backend/app/orchestrator` — STOP/BLOCKED otherwise. Guard `git diff v0.1-benchmark-10of10 -- backend/app/services backend/app/orchestrator` must stay empty.
 - No CAD/frontend/benchmark changes. **Multi-worker disabled by default** — `API_WORKER_MODE="single"` is byte-for-byte current behavior; all new logic behind the flag.
 - Edits ONLY in `backend/app/v1/db.py`, `backend/app/v1/queue.py`, `backend/app/core/config.py`, `tests/test_v1_*`. (main.py unchanged — `recover()`/`start()` branch internally.)
-- Schema: additive only — idempotent `ALTER TABLE jobs ADD COLUMN` for `claimed_by TEXT`, `claimed_at TEXT`, `lease_expires_at TEXT`, `reclaim_count INTEGER DEFAULT 0`. No new tables, no data migration. Old rows → NULL/0.
-- **Lease expiry makes a job RECLAIMABLE (→ pending), never directly failed.** Only `reclaim_count >= API_WORKER_MAX_RECLAIM` → `failed/internal`.
+- Schema: additive only — idempotent `ALTER TABLE jobs ADD COLUMN` for `claimed_by TEXT`, `claimed_at TEXT`, `lease_expires_at TEXT` (exactly these three). No new tables, no data migration. Old rows → NULL.
+- **Lease expiry makes a job RECLAIMABLE (→ pending), never directly failed.** Reclaim clears `claimed_by`/`claimed_at`/`lease_expires_at`. No cap, no fail branch, no poison-job handling in this milestone (deferred to roadmap).
 - Atomic claim = single-winner `UPDATE ... WHERE status='pending'` (`cursor.rowcount==1` wins).
 - Run from product root with cadskills python. Guard-check each commit.
 
@@ -26,12 +26,12 @@
 - Test: `tests/test_v1_worker_db.py`
 
 **Interfaces — Produces:**
-- `init_db` adds the 4 columns idempotently via `_add_column_if_missing(conn, table, name, decl)`.
+- `init_db` adds the 3 columns (`claimed_by`, `claimed_at`, `lease_expires_at`) idempotently via `_add_column_if_missing(conn, table, name, decl)`.
 - `db.next_pending(conn) -> sqlite3.Row | None` (oldest pending by created_at, job_id).
 - `db.count_pending(conn) -> int`.
 - `db.claim_job(conn, job_id, worker_id, *, lease_s, now=None) -> bool` (atomic; True iff this worker won).
 - `db.renew_lease(conn, job_id, worker_id, *, lease_s, now=None) -> bool` (extends lease iff owned).
-- `db.reclaim_expired(conn, *, max_reclaim, now=None) -> dict` (`{"reclaimed": n, "failed": m}`).
+- `db.reclaim_expired(conn, *, now=None) -> int` (count reclaimed → `pending`; no fail branch).
 
 - [ ] **Step 1: Write the failing test**
 ```python
@@ -57,7 +57,8 @@ def _fresh(tmp_path):
 def test_schema_has_worker_columns(tmp_path):
     _p, c = _fresh(tmp_path)
     cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)").fetchall()}
-    assert {"claimed_by", "claimed_at", "lease_expires_at", "reclaim_count"} <= cols
+    assert {"claimed_by", "claimed_at", "lease_expires_at"} <= cols
+    assert "reclaim_count" not in cols          # poison-job handling deferred
     c.close()
 
 
@@ -110,17 +111,32 @@ def test_renew_lease_extends_only_for_owner(tmp_path):
     c.close()
 
 
-def test_reclaim_expired_returns_to_pending_not_failed(tmp_path):
+def test_reclaim_expired_returns_to_pending_clears_claim(tmp_path):
     _p, c = _fresh(tmp_path)
     db.insert_job(c, "j1", "u1", "p1", status="pending")
     past = _iso(_now() - timedelta(seconds=10))
     db.claim_job(c, "j1", "wDead", lease_s=120)
     db.update_job(c, "j1", lease_expires_at=past)        # force expiry
-    res = db.reclaim_expired(c, max_reclaim=3)
-    assert res["reclaimed"] == 1 and res["failed"] == 0
+    n = db.reclaim_expired(c)
+    assert n == 1
     row = db.get_job_row(c, "j1")
     assert row["status"] == "pending"                    # reclaimable, NOT failed
-    assert row["claimed_by"] is None and row["reclaim_count"] == 1
+    assert row["claimed_by"] is None and row["claimed_at"] is None
+    assert row["lease_expires_at"] is None
+    c.close()
+
+
+def test_reclaim_never_fails_a_job(tmp_path):
+    _p, c = _fresh(tmp_path)
+    db.insert_job(c, "j1", "u1", "p1", status="pending")
+    past = _iso(_now() - timedelta(seconds=10))
+    db.claim_job(c, "j1", "wDead", lease_s=120)
+    db.update_job(c, "j1", lease_expires_at=past)
+    db.reclaim_expired(c)                                 # repeated expiry never fails
+    db.claim_job(c, "j1", "wDead2", lease_s=120)
+    db.update_job(c, "j1", lease_expires_at=past)
+    db.reclaim_expired(c)
+    assert db.get_job_row(c, "j1")["status"] == "pending" # still reclaimable, never failed
     c.close()
 
 
@@ -128,31 +144,15 @@ def test_reclaim_does_not_touch_unexpired(tmp_path):
     _p, c = _fresh(tmp_path)
     db.insert_job(c, "j1", "u1", "p1", status="pending")
     db.claim_job(c, "j1", "wLive", lease_s=600)          # far-future lease
-    res = db.reclaim_expired(c, max_reclaim=3)
-    assert res["reclaimed"] == 0
+    assert db.reclaim_expired(c) == 0
     assert db.get_job_row(c, "j1")["status"] == "running"
-    c.close()
-
-
-def test_reclaim_caps_to_failed(tmp_path):
-    _p, c = _fresh(tmp_path)
-    db.insert_job(c, "j1", "u1", "p1", status="pending")
-    past = _iso(_now() - timedelta(seconds=10))
-    # already reclaimed max_reclaim times -> next expiry fails it
-    db.claim_job(c, "j1", "wDead", lease_s=120)
-    db.update_job(c, "j1", lease_expires_at=past, reclaim_count=3)
-    res = db.reclaim_expired(c, max_reclaim=3)
-    assert res["failed"] == 1 and res["reclaimed"] == 0
-    row = db.get_job_row(c, "j1")
-    assert row["status"] == "failed" and row["failure_class"] == "internal"
     c.close()
 
 
 def test_reclaim_treats_null_lease_running_as_expired(tmp_path):
     _p, c = _fresh(tmp_path)
     db.insert_job(c, "j1", "u1", "p1", status="running")  # legacy running, no lease
-    res = db.reclaim_expired(c, max_reclaim=3)
-    assert res["reclaimed"] == 1
+    assert db.reclaim_expired(c) == 1
     assert db.get_job_row(c, "j1")["status"] == "pending"
     c.close()
 ```
@@ -174,7 +174,6 @@ At the end of `init_db` (before any final `conn.commit()` / return), add:
     _add_column_if_missing(conn, "jobs", "claimed_by", "TEXT")
     _add_column_if_missing(conn, "jobs", "claimed_at", "TEXT")
     _add_column_if_missing(conn, "jobs", "lease_expires_at", "TEXT")
-    _add_column_if_missing(conn, "jobs", "reclaim_count", "INTEGER DEFAULT 0")
     conn.commit()
 ```
 (If `init_db` already ends with a commit, keep one commit after the ALTERs.)
@@ -215,30 +214,19 @@ def renew_lease(conn, job_id, worker_id, *, lease_s, now=None) -> bool:
     conn.commit()
     return cur.rowcount == 1
 
-def reclaim_expired(conn, *, max_reclaim, now=None) -> dict:
+def reclaim_expired(conn, *, now=None) -> int:
+    """Expired (or NULL-lease) running jobs -> pending, claim fields cleared.
+    Lease expiry makes a job reclaimable; it never fails the job. Returns count."""
     n = (now or _utc_now()).isoformat()
-    rows = conn.execute(
-        "SELECT job_id, project_id, COALESCE(reclaim_count,0) AS rc FROM jobs "
+    cur = conn.execute(
+        "UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, "
+        "lease_expires_at=NULL "
         "WHERE status='running' AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
-        (n,)).fetchall()
-    reclaimed = failed = 0
-    for r in rows:
-        if r["rc"] >= max_reclaim:
-            conn.execute(
-                "UPDATE jobs SET status='failed', failure_class='internal', "
-                "completed_at=?, claimed_by=NULL, lease_expires_at=NULL "
-                "WHERE job_id=?", (n, r["job_id"]))
-            failed += 1
-        else:
-            conn.execute(
-                "UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, "
-                "lease_expires_at=NULL, reclaim_count=COALESCE(reclaim_count,0)+1 "
-                "WHERE job_id=?", (r["job_id"],))
-            reclaimed += 1
+        (n,))
     conn.commit()
-    return {"reclaimed": reclaimed, "failed": failed}
+    return cur.rowcount
 ```
-(`update_job(**fields)` already supports arbitrary columns, so the tests' `update_job(c,"j1",lease_expires_at=...,reclaim_count=3)` work without change.)
+(`update_job(**fields)` already supports arbitrary columns, so the tests' `update_job(c,"j1",lease_expires_at=...)` work without change. No `reclaim_count` column, no fail branch.)
 
 - [ ] **Step 4: Run, verify pass** — `cd /root/all_project_models/alfaj/text-to-cad-product && /root/anaconda3/envs/cadskills/bin/python -m pytest tests/test_v1_worker_db.py -v` → all pass.
 
@@ -256,7 +244,7 @@ git add backend/app/v1/db.py tests/test_v1_worker_db.py
 git commit -m "feat(v1): additive worker columns + atomic claim/lease/reclaim helpers (multi-worker prep)"
 ```
 
-**Success:** 4 columns present + idempotent; atomic single-winner claim; renew owner-only; reclaim expired→pending (never failed) incrementing reclaim_count; unexpired untouched; cap→failed; NULL-lease running treated expired; existing tests green; guard empty.
+**Success:** 3 columns present (no `reclaim_count`) + idempotent; atomic single-winner claim; renew owner-only; reclaim expired→pending (never failed) clearing claim fields; repeated expiry never fails; unexpired untouched; NULL-lease running treated expired; existing tests green; guard empty.
 
 ---
 
@@ -288,7 +276,6 @@ def _claim_env(monkeypatch):
     monkeypatch.setattr(cfg, "API_WORKER_POLL_S", 0.02)
     monkeypatch.setattr(cfg, "API_WORKER_LEASE_S", 120)
     monkeypatch.setattr(cfg, "API_WORKER_HEARTBEAT_S", 0.02)
-    monkeypatch.setattr(cfg, "API_WORKER_MAX_RECLAIM", 3)
 
 
 def test_claim_mode_runs_job_to_completed(tmp_path, monkeypatch):
@@ -360,7 +347,6 @@ API_WORKER_MODE = os.environ.get("API_WORKER_MODE", "single")   # "single" | "cl
 API_WORKER_LEASE_S = int(os.environ.get("API_WORKER_LEASE_S", "120"))
 API_WORKER_HEARTBEAT_S = int(os.environ.get("API_WORKER_HEARTBEAT_S", "30"))
 API_WORKER_POLL_S = float(os.environ.get("API_WORKER_POLL_S", "2"))
-API_WORKER_MAX_RECLAIM = int(os.environ.get("API_WORKER_MAX_RECLAIM", "3"))
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 ```
 
@@ -394,7 +380,7 @@ WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         conn = db.connect(self.db_path)
         try:
             if self.mode == "claim":
-                db.reclaim_expired(conn, max_reclaim=config.API_WORKER_MAX_RECLAIM)
+                db.reclaim_expired(conn)
             else:
                 for r in db.list_running_jobs(conn):
                     _terminal(conn, r["job_id"], r["project_id"], "failed",
@@ -507,6 +493,6 @@ git commit -m "feat(v1): gated claim-mode worker + heartbeat + lease recovery (m
 ---
 
 ## Self-review
-**Spec coverage:** 4 additive columns idempotent (T1 `_add_column_if_missing`, tests) ✓; atomic single-winner claim (T1 `claim_job`, two-conn test) ✓; lease+heartbeat (T1 `renew_lease`, T2 `_heartbeat`) ✓; lease-scoped recovery, **expiry→reclaimable-not-failed** (T1 `reclaim_expired` test asserts pending; cap→failed) ✓; NULL-lease running treated expired (T1 test) ✓; reclaim_count cap (T1) ✓; flag gate `API_WORKER_MODE` single=current/claim=new (T2 start/recover/depth/enqueue branch; single-mode regression) ✓; poll-based queue source (T2 `_claim_worker`) ✓; worker_id (T2 config `WORKER_ID`) ✓; config knobs (T2) ✓; single default byte-for-byte (T2 step6 regression, T3) ✓; no engine/main.py/frontend/benchmark changes ✓; SQLite single-host ✓.
+**Spec coverage:** 3 additive columns idempotent, no `reclaim_count` (T1 `_add_column_if_missing`, schema test asserts absence) ✓; atomic single-winner claim (T1 `claim_job`, two-conn test) ✓; lease+heartbeat (T1 `renew_lease`, T2 `_heartbeat`) ✓; lease-scoped recovery, **expiry→reclaimable→pending, clears claim fields, NEVER failed** (T1 tests: pending+cleared, repeated-expiry-never-fails) ✓; NULL-lease running treated expired (T1 test) ✓; no cap / no poison-job handling (deferred to roadmap) ✓; flag gate `API_WORKER_MODE` single=current/claim=new (T2 start/recover/depth/enqueue branch; single-mode regression) ✓; poll-based queue source (T2 `_claim_worker`) ✓; worker_id (T2 config `WORKER_ID`) ✓; config knobs, no `MAX_RECLAIM` (T2) ✓; single default byte-for-byte (T2 step6 regression, T3) ✓; no engine/main.py/frontend/benchmark changes ✓; SQLite single-host ✓.
 **Placeholder scan:** none — all code concrete.
-**Type consistency:** `claim_job(conn,job_id,worker_id,*,lease_s,now=None)->bool`, `renew_lease(...)->bool`, `reclaim_expired(conn,*,max_reclaim,now=None)->dict{reclaimed,failed}`, `next_pending(conn)->Row|None`, `count_pending(conn)->int` consistent T1↔T2; `JobQueue.mode/worker_id`, `_claim_worker`, `_heartbeat` consistent; `_terminal`/`_TERMINAL`/`_worker` reused unchanged. `config.WORKER_ID`/`API_WORKER_*` names consistent.
+**Type consistency:** `claim_job(conn,job_id,worker_id,*,lease_s,now=None)->bool`, `renew_lease(...)->bool`, `reclaim_expired(conn,*,now=None)->int`, `next_pending(conn)->Row|None`, `count_pending(conn)->int` consistent T1↔T2; `JobQueue.mode/worker_id`, `_claim_worker`, `_heartbeat` consistent; `_terminal`/`_TERMINAL`/`_worker` reused unchanged. `config.WORKER_ID`/`API_WORKER_*` names consistent.
