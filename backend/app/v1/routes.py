@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from app.core import config, paths
 from app.services import job_service, artifact_service, claude_code_adapter
-from app.v1 import auth, db
+from app.v1 import auth, db, retention
 from app.v1.models import JobCreate, JobView
 from app.api.events import _gen
 from app.ai.llm import client as orch_client, config as orch_cfg
@@ -21,6 +21,11 @@ def _owned_row(conn, job_id, user_id):
     if row is None or row["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="job not found")
     return row
+
+def _purged(r) -> bool:
+    """Terminal job whose project dir no longer exists -> artifacts expired."""
+    return (r["status"] in ("completed", "failed", "cancelled")
+            and not (config.PROJECTS_ROOT / r["project_id"]).exists())
 
 @router.post("/jobs", status_code=201)
 def create_job(body: JobCreate, request: Request, user_id: str = Depends(auth.require_user),
@@ -83,7 +88,8 @@ def get_job(job_id: str, user_id: str = Depends(auth.require_user),
                    failure_class=r["failure_class"],
                    queue_pos=db.pending_position(conn, job_id),
                    created_at=r["created_at"], started_at=r["started_at"],
-                   completed_at=r["completed_at"])
+                   completed_at=r["completed_at"],
+                   artifacts_available=(config.PROJECTS_ROOT / r["project_id"]).exists())
 
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job(job_id: str, user_id: str = Depends(auth.require_user),
@@ -98,6 +104,9 @@ def cancel_job(job_id: str, user_id: str = Depends(auth.require_user),
 def list_artifacts(job_id: str, user_id: str = Depends(auth.require_user),
                    conn=Depends(db.get_conn)):
     r = _owned_row(conn, job_id, user_id)
+    if _purged(r):
+        return JSONResponse(status_code=410,
+                            content={"detail": "artifacts expired", "purged": True})
     listing = artifact_service.list_artifacts(r["project_id"])
     arts = listing.artifacts if listing else []
     return {"artifacts": [{"name": a.name, "category": a.category,
@@ -107,6 +116,9 @@ def list_artifacts(job_id: str, user_id: str = Depends(auth.require_user),
 def download_artifact(job_id: str, rel: str, user_id: str = Depends(auth.require_user),
                       conn=Depends(db.get_conn)):
     r = _owned_row(conn, job_id, user_id)
+    if _purged(r):
+        return JSONResponse(status_code=410,
+                            content={"detail": "artifacts expired", "purged": True})
     root = paths.project_dir(r["project_id"]).resolve()
     rel_path = Path(rel)
     if rel_path.is_absolute() or ".." in rel_path.parts:
@@ -230,3 +242,21 @@ def admin_clear_quota(target_user_id: str,
                       _: bool = Depends(auth.require_admin), conn=Depends(db.get_conn)):
     db.clear_quota(conn, target_user_id)
     return {"cleared": target_user_id}
+
+class _RetentionSweepReq(BaseModel):
+    dry_run: bool = True
+    overrides: dict | None = None
+
+@router.post("/admin/retention/sweep")
+def admin_retention_sweep(body: _RetentionSweepReq,
+                          _admin: bool = Depends(auth.require_admin),
+                          conn=Depends(db.get_conn)):
+    if not config.API_RETENTION_ENABLED:
+        return {"enabled": False, "dry_run": body.dry_run, "scanned": 0,
+                "eligible": 0, "deleted": 0, "reclaimed_bytes": 0,
+                "capped": False, "by_status": {}, "duration_ms": 0}
+    s = retention.sweep(conn, dry_run=body.dry_run, overrides=body.overrides)
+    return {"enabled": True, "dry_run": s.dry_run, "scanned": s.scanned,
+            "eligible": s.eligible, "deleted": s.deleted,
+            "reclaimed_bytes": s.reclaimed_bytes, "capped": s.capped,
+            "by_status": s.by_status, "duration_ms": s.duration_ms}

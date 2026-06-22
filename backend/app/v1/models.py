@@ -16,3 +16,4 @@ class JobView(BaseModel):
     created_at: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
+    artifacts_available: bool | None = None
