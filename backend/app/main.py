@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core import config
 from app.core.config import API_PREFIX, APP_TITLE, APP_VERSION, PRODUCT_ROOT, V1_CORS_ORIGINS
 from app.services import claude_code_adapter
-from app.v1 import db as v1db, routes as v1routes, retention as v1retention
+from app.v1 import db as v1db, routes as v1routes, retention as v1retention, reaper as v1reaper
 from app.v1.ratelimit import RateLimitMiddleware
 from app.v1.queue import JobQueue
 
@@ -32,6 +32,11 @@ async def _lifespan(app):
             "API_KEY_SALT is the default in a production deployment (ADMIN_API_KEY is set). "
             "Set a strong API_KEY_SALT.")
     c = v1db.connect(); v1db.init_db(c); c.close()
+    if config.API_REAP_ORPHAN_CLAUDE:
+        try:
+            v1reaper.reap_orphan_claude()
+        except Exception:
+            pass
     q = JobQueue()                      # reads config.API_DB_PATH
     q.recover(); q.start()
     app.state.queue = q

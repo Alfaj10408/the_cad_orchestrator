@@ -12,6 +12,7 @@ def _reload(origins):
     os.environ["API_KEY_SALT"] = "test-cors-salt"
     os.environ["API_RATE_LIMIT_ENABLED"] = "0"
     os.environ["API_RETENTION_ENABLED"] = "0"
+    os.environ["API_REAP_ORPHAN_CLAUDE"] = "0"
     from app.core import config as cfg; importlib.reload(cfg)
     from app import main as m; importlib.reload(m)
     return m
