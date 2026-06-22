@@ -20,6 +20,7 @@ from app.core import config
 from app.core.config import API_PREFIX, APP_TITLE, APP_VERSION, PRODUCT_ROOT, V1_CORS_ORIGINS
 from app.services import claude_code_adapter
 from app.v1 import db as v1db, routes as v1routes
+from app.v1.ratelimit import RateLimitMiddleware
 from app.v1.queue import JobQueue
 
 
@@ -41,6 +42,10 @@ async def _lifespan(app):
 
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION, lifespan=_lifespan)
+
+from app.core.config import API_RATE_LIMIT_ENABLED
+if API_RATE_LIMIT_ENABLED:
+    app.add_middleware(RateLimitMiddleware)
 
 if V1_CORS_ORIGINS:
     app.add_middleware(

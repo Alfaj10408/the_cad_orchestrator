@@ -8,6 +8,7 @@ def test_v1_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("API_DB_PATH", str(tmp_path/"api.db"))
     monkeypatch.setenv("ADMIN_API_KEY", "admin-secret")
     monkeypatch.setenv("API_KEY_SALT", "test-salt-integration")
+    monkeypatch.setenv("API_RATE_LIMIT_ENABLED", "0")
     import importlib
     from app.core import config as cfg; importlib.reload(cfg)
     from app.core import paths as app_paths; importlib.reload(app_paths)  # reset any test contamination

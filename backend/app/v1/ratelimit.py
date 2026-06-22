@@ -102,3 +102,48 @@ def check(scope_id: str, category: str, now: float | None = None) -> Decision:
 
 def reset() -> None:
     _buckets.clear()
+
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+
+from app.v1 import auth as _auth
+
+
+def _scope_id(request) -> str:
+    raw = request.headers.get("authorization")
+    token = _auth._bearer(raw)        # returns the bearer token or None
+    if token:
+        return "key:" + _auth.hash_key(token)
+    client = request.client.host if request.client else "unknown"
+    return "ip:" + client
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if not config.API_RATE_LIMIT_ENABLED:
+            return await call_next(request)
+        category = classify(request.method, request.url.path)
+        if category is None:
+            return await call_next(request)
+        d = check(_scope_id(request), category)
+        headers = {
+            "X-RateLimit-Limit": str(d.limit),
+            "X-RateLimit-Remaining": str(d.remaining),
+            "X-RateLimit-Reset": str(d.reset),
+        }
+        if not d.allowed:
+            headers["Retry-After"] = str(d.retry_after)
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "detail": f"rate limit exceeded for {category}",
+                    "scope": "rate_limit",
+                    "retry_after": d.retry_after,
+                },
+                headers=headers,
+            )
+        response = await call_next(request)
+        for k, v in headers.items():
+            response.headers[k] = v
+        return response
