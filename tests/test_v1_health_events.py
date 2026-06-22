@@ -22,5 +22,7 @@ def test_healthz_unauth(tmp_path, monkeypatch):
     app.include_router(routes.router)
     c = TestClient(app)
     assert c.get("/v1/healthz").json()["ok"] is True
-    r = c.get("/v1/readyz").json()
-    assert "checks" in r and "ready" in r
+    resp = c.get("/v1/readyz")
+    r = resp.json()
+    assert "checks" in r and "ready" in r and "timestamp" in r
+    assert resp.status_code in (200, 503)

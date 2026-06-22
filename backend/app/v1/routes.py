@@ -1,15 +1,17 @@
 """/v1 production API facade. Wraps existing pipeline services."""
 from __future__ import annotations
-import json, uuid
+import json, uuid, time, shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from app.core import config, paths
 from app.services import job_service, artifact_service, claude_code_adapter
 from app.v1 import auth, db
 from app.v1.models import JobCreate, JobView
 from app.api.events import _gen
+from app.ai.llm import client as orch_client, config as orch_cfg
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 _ALLOWED_MODES = {"qwen_claude_code", "deterministic"}
@@ -110,22 +112,65 @@ async def stream_events(job_id: str, request: Request,
 def healthz():
     return {"ok": True}
 
+_readyz_cache: dict = {}
+
+def _cached(key, fn):
+    now = time.monotonic()
+    hit = _readyz_cache.get(key)
+    if hit is not None and (now - hit[0]) < config.API_READYZ_CACHE_S:
+        return hit[1]
+    val = fn()
+    _readyz_cache[key] = (now, val)
+    return val
+
+def _check_db() -> bool:
+    try:
+        c = db.connect(); c.execute("SELECT 1"); c.close(); return True
+    except Exception:
+        return False
+
+def _check_storage() -> bool:
+    try:
+        d = config.PROJECTS_ROOT
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / ".readyz_write_test"
+        p.write_text("ok"); p.unlink()
+        return True
+    except Exception:
+        return False
+
+def _check_disk() -> bool:
+    try:
+        free = shutil.disk_usage(str(config.STORAGE_ROOT)).free
+        return free >= config.API_MIN_DISK_MB * 1024 * 1024
+    except Exception:
+        return False
+
+def _check_claude() -> bool:
+    try:
+        h = claude_code_adapter.health()
+        return bool(h.get("installed") and h.get("authenticated"))
+    except Exception:
+        return False
+
 @router.get("/readyz")
 def readyz(request: Request):
-    checks = {}
-    try:
-        c = db.connect(); c.execute("SELECT 1"); c.close()
-        checks["db"] = True
-    except Exception:
-        checks["db"] = False
-    try:
-        checks["claude_code"] = bool(claude_code_adapter.health().get("authenticated"))
-    except Exception:
-        checks["claude_code"] = False
+    checks: dict = {}
+    checks["db"] = _check_db()
     q = request.app.state.queue
-    checks["worker"] = bool(getattr(q, "alive", lambda: True)())
-    ready = all(checks.values())
-    return {"ready": ready, "checks": checks}
+    checks["queue"] = bool(getattr(q, "alive", lambda: True)())
+    checks["storage"] = _check_storage()
+    checks["disk"] = _check_disk()
+    checks["orchestrator"] = (
+        _cached("orchestrator", lambda: bool(orch_client.health().get("ok")))
+        if orch_cfg.ORCHESTRATOR_ENABLED else "skipped")
+    checks["claude_code"] = (
+        _cached("claude_code", _check_claude)
+        if config.CLAUDE_CODE_ENABLED else "skipped")
+    ready = all(v is True for v in checks.values() if isinstance(v, bool))
+    body = {"ready": ready, "checks": checks,
+            "timestamp": datetime.now(timezone.utc).isoformat()}
+    return JSONResponse(status_code=200 if ready else 503, content=body)
 
 class _KeyReq(BaseModel):
     user_name: str

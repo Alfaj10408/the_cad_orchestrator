@@ -73,3 +73,5 @@ API_KEY_SALT = os.environ.get("API_KEY_SALT", "dev-salt-change-me")
 API_MAX_QUEUE_DEPTH = int(os.environ.get("API_MAX_QUEUE_DEPTH", "32"))
 JOB_WALLCLOCK_TIMEOUT = int(os.environ.get("JOB_WALLCLOCK_TIMEOUT", "5400"))
 V1_CORS_ORIGINS = [o for o in os.environ.get("V1_CORS_ORIGINS", "").split(",") if o]
+API_MIN_DISK_MB = int(os.environ.get("API_MIN_DISK_MB", "500"))
+API_READYZ_CACHE_S = int(os.environ.get("API_READYZ_CACHE_S", "15"))
