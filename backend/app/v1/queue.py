@@ -71,6 +71,9 @@ class JobQueue:
             except Exception:  # noqa: BLE001
                 db.update_job(self.conn, job_id, status="failed", failure_class="internal",
                               completed_at=_now()); continue
+            current = db.get_job_row(self.conn, job_id)
+            if current is not None and current["status"] == "cancelled":
+                continue  # user cancelled mid-run; do not overwrite
             j = job_service.get_job(job_id)
             status = getattr(j, "status", "FAILED_CAD")
             mapped, fclass = _TERMINAL.get(status, ("failed", "internal"))

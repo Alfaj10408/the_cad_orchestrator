@@ -32,3 +32,27 @@ def test_recover_marks_running_as_failed(tmp_path):
     jq = q.JobQueue(conn); jq.recover(conn)
     row=db.get_job_row(conn,"jr")
     assert row["status"]=="failed" and row["failure_class"]=="internal"
+
+def test_queue_does_not_overwrite_cancelled_job(tmp_path, monkeypatch):
+    conn = db.connect(str(tmp_path/"c.db")); db.init_db(conn)
+    db.insert_job(conn, "j2", "u1", "p1", status="pending")
+    ran = {}
+    async def fake_run(project_id, job_id):
+        ran["called"]=(project_id,job_id)
+        # simulate user cancelling mid-run: set job to cancelled before run completes
+        db.update_job(conn, job_id, status="cancelled")
+    monkeypatch.setattr(q.claude_generation, "run", fake_run)
+    # job_service returns COMPLETED, but we should NOT use it if already cancelled
+    monkeypatch.setattr(q.job_service, "get_job", lambda jid: _Job("COMPLETED"))
+    jq = q.JobQueue(conn)
+    async def drive():
+        jq.start(); jq.enqueue("j2")
+        for _ in range(50):
+            row = db.get_job_row(conn,"j2")
+            if row["status"]=="cancelled": break
+            await asyncio.sleep(0.02)
+        await jq.stop()
+    asyncio.run(drive())
+    assert ran["called"]==("p1","j2")
+    # assert job stays cancelled, NOT overwritten to completed
+    assert db.get_job_row(conn,"j2")["status"]=="cancelled"
