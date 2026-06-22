@@ -24,7 +24,7 @@
 
 **Interfaces — Produces:**
 - config: `API_DB_PATH`, `ADMIN_API_KEY`, `API_KEY_SALT`, `API_MAX_QUEUE_DEPTH`, `JOB_WALLCLOCK_TIMEOUT`, `V1_CORS_ORIGINS`.
-- `db.connect(path=None) -> sqlite3.Connection` (WAL, row factory); `db.init_db(conn)`; CRUD: `create_user`, `create_api_key`, `get_key_by_hash`, `revoke_key`, `insert_job`, `update_job`, `get_job_row`, `list_pending_jobs`, `list_running_jobs`.
+- `db.connect(path=None) -> sqlite3.Connection` (WAL, row factory); `db.init_db(conn)`; CRUD: `create_user`, `get_user`, `create_api_key`, `get_key_by_hash`, `revoke_key`, `insert_job`, `update_job`, `get_job_row`, `list_pending_jobs`, `list_running_jobs`.
 
 - [ ] **Step 1: failing test**
 ```python
@@ -42,6 +42,7 @@ def _conn(tmp_path):
 def test_user_key_job_roundtrip(tmp_path):
     c = _conn(tmp_path)
     uid = db.create_user(c, "alice", is_admin=False)
+    assert db.get_user(c, uid)["name"] == "alice"
     kid = db.create_api_key(c, uid, key_hash="h1", key_prefix="sk_abc")
     assert db.get_key_by_hash(c, "h1")["user_id"] == uid
     db.insert_job(c, "j1", uid, "p1", status="pending")
@@ -113,6 +114,9 @@ def create_api_key(conn, user_id, key_hash, key_prefix) -> str:
     conn.execute("INSERT INTO api_keys(id,user_id,key_hash,key_prefix,created_at) VALUES(?,?,?,?,?)",
                  (kid, user_id, key_hash, key_prefix, _now())); conn.commit()
     return kid
+
+def get_user(conn, user_id):
+    return conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
 
 def get_key_by_hash(conn, key_hash):
     return conn.execute(
@@ -432,6 +436,10 @@ def test_create_and_get_job_requires_auth(tmp_path):
     # ownership: another user cannot see it
     key2,_,_,_ = auth.mint_key(conn, "u2")
     assert c.get(f"/v1/jobs/{jid}", headers={"Authorization":f"Bearer {key2}"}).status_code == 404
+    # /v1/me returns the authenticated user
+    me = c.get("/v1/me", headers=h)
+    assert me.status_code == 200 and me.json()["user_id"] == uid and me.json()["name"] == "u"
+    assert c.get("/v1/me").status_code == 401  # unauth
 ```
 
 - [ ] **Step 2: run, verify fail.**
@@ -507,6 +515,13 @@ def create_job(body: JobCreate, request: Request, user_id: str = Depends(auth.re
         raise HTTPException(status_code=429, detail="queue full")
     db.update_job(_conn(request), job.job_id, queue_pos=pos)
     return {"job_id": job.job_id, "status": "pending", "queue_pos": pos}
+
+@router.get("/me")
+def whoami(request: Request, user_id: str = Depends(auth.require_user)):
+    u = db.get_user(_conn(request), user_id)
+    if u is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    return {"user_id": user_id, "name": u["name"], "is_admin": bool(u["is_admin"])}
 
 @router.get("/jobs/{job_id}", response_model=JobView)
 def get_job(job_id: str, request: Request, user_id: str = Depends(auth.require_user)):

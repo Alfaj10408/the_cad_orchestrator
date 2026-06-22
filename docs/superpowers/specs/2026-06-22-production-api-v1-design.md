@@ -47,6 +47,7 @@ All require `Authorization: Bearer <key>` except `healthz`/`readyz`.
 
 | Method · path | Auth | Behavior |
 |---|---|---|
+| `GET /v1/me` | user | `{user_id, name, is_admin}` for the authenticated key |
 | `POST /v1/jobs` | user | body `{prompt, dimensions?, material?, mode?}` (default mode `qwen_claude_code`). Creates internal project + brief + job, inserts `jobs` row `pending`, enqueues, returns `{job_id, status, queue_pos}` |
 | `GET /v1/jobs/{id}` | user (owner) | `{job_id, status, stage, failure_class?, queue_pos?, created/started/completed_at, components_passed?, metrics?}` |
 | `GET /v1/jobs/{id}/events` | user (owner) | SSE — reuses `event_service` channel for the job's `project_id`; supports `Last-Event-ID` replay |
