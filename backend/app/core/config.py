@@ -69,6 +69,23 @@ CLAUDE_CODE_MAX_REPAIRS = int(os.environ.get("CLAUDE_CODE_MAX_REPAIRS", "2"))
 API_DB_PATH = os.environ.get("API_DB_PATH", str(STORAGE_ROOT / "api.db"))
 API_DB_BUSY_TIMEOUT_MS = int(os.environ.get("API_DB_BUSY_TIMEOUT_MS", "5000"))
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+ADMIN_API_KEYS = os.environ.get("ADMIN_API_KEYS", "")
+ADMIN_KEYS_INFO_ENABLED = _flag("ADMIN_KEYS_INFO_ENABLED", "1")
+
+
+def admin_key_set() -> frozenset:
+    """Effective admin keys: union of ADMIN_API_KEY (legacy) and the
+    comma-separated ADMIN_API_KEYS. Derived from config attributes (set at
+    process start) so rotation = update env + restart; reading attrs (not
+    os.environ) keeps tests that monkeypatch ADMIN_API_KEY working."""
+    keys = set()
+    if ADMIN_API_KEY:
+        keys.add(ADMIN_API_KEY)
+    for k in ADMIN_API_KEYS.split(","):
+        k = k.strip()
+        if k:
+            keys.add(k)
+    return frozenset(keys)
 API_KEY_SALT = os.environ.get("API_KEY_SALT", "dev-salt-change-me")
 API_MAX_QUEUE_DEPTH = int(os.environ.get("API_MAX_QUEUE_DEPTH", "32"))
 JOB_WALLCLOCK_TIMEOUT = int(os.environ.get("JOB_WALLCLOCK_TIMEOUT", "5400"))

@@ -31,10 +31,18 @@ def _resolve_user(conn, authorization: str | None) -> str:
         raise HTTPException(status_code=401, detail="invalid api key")
     return row["user_id"]
 
+def admin_fingerprint(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()[:8]
+
 def _is_admin(authorization: str | None) -> bool:
     token = _bearer(authorization)
-    admin = config.ADMIN_API_KEY
-    return bool(admin) and token is not None and hmac.compare_digest(token, admin)
+    if not token:
+        return False
+    ok = False
+    for k in config.admin_key_set():
+        if hmac.compare_digest(token, k):
+            ok = True          # compare all keys, no early return (timing)
+    return ok
 
 # FastAPI deps
 def require_user(authorization: str | None = Header(default=None),
