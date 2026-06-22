@@ -24,9 +24,9 @@ from app.v1.queue import JobQueue
 
 @asynccontextmanager
 async def _lifespan(app):
-    conn = v1db.connect(); v1db.init_db(conn)
-    app.state.db = conn
-    q = JobQueue(conn); q.recover(conn); q.start()
+    c = v1db.connect(); v1db.init_db(c); c.close()
+    q = JobQueue()                      # reads config.API_DB_PATH
+    q.recover(); q.start()
     app.state.queue = q
     try:
         yield
