@@ -36,9 +36,10 @@ def _is_admin(authorization: str | None) -> bool:
     admin = config.ADMIN_API_KEY
     return bool(admin) and token is not None and hmac.compare_digest(token, admin)
 
-# FastAPI deps (conn provided by app state via dependency in routes module)
-def require_user(request: Request, authorization: str | None = Header(default=None)) -> str:
-    return _resolve_user(request.app.state.db, authorization)
+# FastAPI deps
+def require_user(authorization: str | None = Header(default=None),
+                 conn=Depends(db.get_conn)) -> str:
+    return _resolve_user(conn, authorization)
 
 def require_admin(authorization: str | None = Header(default=None)) -> bool:
     if not _is_admin(authorization):
