@@ -26,6 +26,8 @@ def _terminal(conn, job_id, project_id, status, failure_class=None, stage=None):
 class JobQueue:
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path or config.API_DB_PATH
+        self.mode = config.API_WORKER_MODE
+        self.worker_id = config.WORKER_ID
         self._q: asyncio.Queue[str] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._conn = None
@@ -33,7 +35,10 @@ class JobQueue:
     def start(self):
         if self._task is None:
             self._conn = db.connect(self.db_path)
-            self._task = asyncio.create_task(self._worker())
+            if self.mode == "claim":
+                self._task = asyncio.create_task(self._claim_worker())
+            else:
+                self._task = asyncio.create_task(self._worker())
 
     async def stop(self):
         if self._task:
@@ -45,12 +50,23 @@ class JobQueue:
             self._conn.close(); self._conn = None
 
     def depth(self) -> int:
+        if self.mode == "claim":
+            c = db.connect(self.db_path)
+            try: return db.count_pending(c)
+            finally: c.close()
         return self._q.qsize()
 
     def alive(self):
         return self._task is not None and not self._task.done()
 
     def enqueue(self, job_id: str) -> int:
+        if self.mode == "claim":
+            c = db.connect(self.db_path)
+            try: n = db.count_pending(c)
+            finally: c.close()
+            if n > config.API_MAX_QUEUE_DEPTH:
+                raise RuntimeError("queue full")
+            return n                       # row already inserted as pending; worker polls
         if self._q.qsize() >= config.API_MAX_QUEUE_DEPTH:
             raise RuntimeError("queue full")
         self._q.put_nowait(job_id)
@@ -59,11 +75,14 @@ class JobQueue:
     def recover(self):
         conn = db.connect(self.db_path)
         try:
-            for r in db.list_running_jobs(conn):
-                _terminal(conn, r["job_id"], r["project_id"], "failed",
-                          failure_class="internal")
-            for r in db.list_pending_jobs(conn):
-                self._q.put_nowait(r["job_id"])
+            if self.mode == "claim":
+                db.reclaim_expired(conn)
+            else:
+                for r in db.list_running_jobs(conn):
+                    _terminal(conn, r["job_id"], r["project_id"], "failed",
+                              failure_class="internal")
+                for r in db.list_pending_jobs(conn):
+                    self._q.put_nowait(r["job_id"])
         finally:
             conn.close()
 
@@ -91,4 +110,46 @@ class JobQueue:
             status = getattr(j, "status", "FAILED_CAD")
             mapped, fclass = _TERMINAL.get(status, ("failed", "internal"))
             _terminal(self._conn, job_id, row["project_id"], mapped,
+                      failure_class=fclass, stage=getattr(j, "stage", None))
+
+    async def _heartbeat(self, job_id):
+        try:
+            while True:
+                await asyncio.sleep(config.API_WORKER_HEARTBEAT_S)
+                db.renew_lease(self._conn, job_id, self.worker_id,
+                               lease_s=config.API_WORKER_LEASE_S)
+        except asyncio.CancelledError:
+            pass
+
+    async def _claim_worker(self):
+        while True:
+            row = db.next_pending(self._conn)
+            if row is None:
+                await asyncio.sleep(config.API_WORKER_POLL_S)
+                continue
+            job_id, project_id = row["job_id"], row["project_id"]
+            if not db.claim_job(self._conn, job_id, self.worker_id,
+                                lease_s=config.API_WORKER_LEASE_S):
+                continue                    # another worker won; poll again
+            hb = asyncio.create_task(self._heartbeat(job_id))
+            try:
+                await asyncio.wait_for(
+                    claude_generation.run(project_id, job_id),
+                    timeout=config.JOB_WALLCLOCK_TIMEOUT)
+            except asyncio.TimeoutError:
+                hb.cancel()
+                _terminal(self._conn, job_id, project_id, "failed", failure_class="cad")
+                continue
+            except Exception:  # noqa: BLE001
+                hb.cancel()
+                _terminal(self._conn, job_id, project_id, "failed", failure_class="internal")
+                continue
+            hb.cancel()
+            current = db.get_job_row(self._conn, job_id)
+            if current is not None and current["status"] == "cancelled":
+                _terminal(self._conn, job_id, project_id, "cancelled"); continue
+            j = job_service.get_job(job_id)
+            status = getattr(j, "status", "FAILED_CAD")
+            mapped, fclass = _TERMINAL.get(status, ("failed", "internal"))
+            _terminal(self._conn, job_id, project_id, mapped,
                       failure_class=fclass, stage=getattr(j, "stage", None))

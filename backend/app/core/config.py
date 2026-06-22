@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import socket
+import uuid
 from pathlib import Path
 
 # .../backend/app/core/config.py -> parents[3] = product root
@@ -116,3 +118,10 @@ API_RETENTION_MAX_DELETE = int(os.environ.get("API_RETENTION_MAX_DELETE", "1000"
 # --- /v1 F7+F11 hardening (P2) ---
 API_REAP_ORPHAN_CLAUDE = _flag("API_REAP_ORPHAN_CLAUDE", "1")
 API_FAILURES_RECENT_LIMIT = int(os.environ.get("API_FAILURES_RECENT_LIMIT", "50"))
+
+# --- /v1 multi-worker prep (P2) ---
+API_WORKER_MODE = os.environ.get("API_WORKER_MODE", "single")   # "single" | "claim"
+API_WORKER_LEASE_S = int(os.environ.get("API_WORKER_LEASE_S", "120"))
+API_WORKER_HEARTBEAT_S = int(os.environ.get("API_WORKER_HEARTBEAT_S", "30"))
+API_WORKER_POLL_S = float(os.environ.get("API_WORKER_POLL_S", "2"))
+WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
