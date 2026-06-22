@@ -1,4 +1,5 @@
 """FastAPI application entrypoint (MVP v1 skeleton)."""
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core import config
 from app.core.config import API_PREFIX, APP_TITLE, APP_VERSION, PRODUCT_ROOT, V1_CORS_ORIGINS
 from app.services import claude_code_adapter
-from app.v1 import db as v1db, routes as v1routes
+from app.v1 import db as v1db, routes as v1routes, retention as v1retention
 from app.v1.ratelimit import RateLimitMiddleware
 from app.v1.queue import JobQueue
 
@@ -34,9 +35,27 @@ async def _lifespan(app):
     q = JobQueue()                      # reads config.API_DB_PATH
     q.recover(); q.start()
     app.state.queue = q
+    _retention_task = None
+    if config.API_RETENTION_ENABLED:
+        try:
+            rc = v1db.connect(); v1retention.sweep(rc, dry_run=False); rc.close()
+        except Exception:
+            pass
+
+        async def _retention_loop():
+            while True:
+                await asyncio.sleep(config.API_RETENTION_SWEEP_INTERVAL_S)
+                try:
+                    rc = v1db.connect(); v1retention.sweep(rc, dry_run=False); rc.close()
+                except Exception:
+                    pass
+
+        _retention_task = asyncio.create_task(_retention_loop())
     try:
         yield
     finally:
+        if _retention_task is not None:
+            _retention_task.cancel()
         await q.stop()
         await claude_code_adapter.shutdown()
 
