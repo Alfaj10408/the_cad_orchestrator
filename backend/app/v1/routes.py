@@ -4,7 +4,7 @@ import json, uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from app.core import config, paths
-from app.services import job_service, artifact_service, claude_code_adapter, event_service
+from app.services import job_service, artifact_service, claude_code_adapter
 from app.v1 import auth, db
 from app.v1.models import JobCreate, JobView
 
@@ -81,6 +81,6 @@ def download_artifact(job_id: str, name: str, request: Request,
     r = _owned_row(request, job_id, user_id)
     root = paths.project_dir(r["project_id"]).resolve()
     target = (root / "cad" / name).resolve()
-    if not str(target).startswith(str(root)) or not target.is_file():
+    if root not in target.parents or not target.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
     return FileResponse(str(target), filename=name)
