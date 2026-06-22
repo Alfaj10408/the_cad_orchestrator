@@ -3,6 +3,7 @@ from pathlib import Path
 _BACKEND = Path(__file__).resolve().parents[1] / "backend"
 if str(_BACKEND) not in sys.path: sys.path.insert(0, str(_BACKEND))
 from app.v1 import db
+from app.v1.queue import JobQueue
 
 def _conn(tmp_path):
     c = db.connect(str(tmp_path / "qp.db")); db.init_db(c); return c
@@ -27,6 +28,32 @@ def test_non_pending_returns_none(tmp_path):
     assert db.pending_position(c, "a") is None   # not pending → None
     assert db.pending_position(c, "b") == 1      # b shifts to 1
     assert db.pending_position(c, "missing") is None
+
+def test_recovery_order_preserves_created_at(tmp_path):
+    """Verify that JobQueue.recover() loads pending jobs in created_at order."""
+    db_path = str(tmp_path / "recovery.db")
+    c = db.connect(db_path)
+    db.init_db(c)
+    # Seed 3 pending jobs in order a, b, c (created_at ascending)
+    for jid in ("a", "b", "c"):
+        _add(c, jid, status="pending")
+    c.close()
+
+    # Build JobQueue and recover
+    jq = JobQueue(db_path)
+    jq.recover()
+
+    # Verify internal queue drains in created_at order (a, b, c)
+    assert jq._q.get_nowait() == "a"
+    assert jq._q.get_nowait() == "b"
+    assert jq._q.get_nowait() == "c"
+
+    # Verify pending_position ranks them 1, 2, 3
+    c = db.connect(db_path)
+    assert db.pending_position(c, "a") == 1
+    assert db.pending_position(c, "b") == 2
+    assert db.pending_position(c, "c") == 3
+    c.close()
 
 # --- route-level tests ---
 from fastapi import FastAPI
