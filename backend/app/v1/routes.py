@@ -218,6 +218,15 @@ class _QuotaReq(BaseModel):
     daily_job_limit: int | None = None
     max_in_flight: int | None = None
 
+@router.get("/admin/keys/info")
+def admin_keys_info(_: bool = Depends(auth.require_admin),
+                    authorization: str | None = Header(default=None)):
+    if not config.ADMIN_KEYS_INFO_ENABLED:
+        raise HTTPException(status_code=404, detail="not found")
+    token = auth._bearer(authorization) or ""
+    return {"admin_keys_configured": len(config.admin_key_set()),
+            "authenticated_fingerprint": auth.admin_fingerprint(token)}
+
 @router.post("/admin/keys", status_code=201)
 def admin_mint_key(body: _KeyReq, _: bool = Depends(auth.require_admin),
                    conn=Depends(db.get_conn)):
