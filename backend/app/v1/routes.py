@@ -153,6 +153,12 @@ def _check_claude() -> bool:
     except Exception:
         return False
 
+def _check_orchestrator() -> bool:
+    try:
+        return bool(orch_client.health().get("ok"))
+    except Exception:
+        return False
+
 @router.get("/readyz")
 def readyz(request: Request):
     checks: dict = {}
@@ -162,7 +168,7 @@ def readyz(request: Request):
     checks["storage"] = _check_storage()
     checks["disk"] = _check_disk()
     checks["orchestrator"] = (
-        _cached("orchestrator", lambda: bool(orch_client.health().get("ok")))
+        _cached("orchestrator", _check_orchestrator)
         if orch_cfg.ORCHESTRATOR_ENABLED else "skipped")
     checks["claude_code"] = (
         _cached("claude_code", _check_claude)

@@ -75,3 +75,23 @@ def test_claude_enabled_unauth_503(tmp_path, monkeypatch):
     monkeypatch.setattr(routes.claude_code_adapter, "health",
                         lambda: {"installed": True, "authenticated": False})
     r = tc.get("/v1/readyz"); assert r.status_code == 503 and r.json()["checks"]["claude_code"] is False
+
+def test_storage_unwritable_503(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch_cfg, "ORCHESTRATOR_ENABLED", False)
+    monkeypatch.setattr(cfg, "CLAUDE_CODE_ENABLED", False)
+    tc = _app(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "_check_storage", lambda: False)
+    r = tc.get("/v1/readyz")
+    assert r.status_code == 503
+    checks = r.json()["checks"]
+    assert checks["storage"] is False
+
+def test_orchestrator_raises_is_503_not_500(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch_cfg, "ORCHESTRATOR_ENABLED", True)
+    monkeypatch.setattr(cfg, "CLAUDE_CODE_ENABLED", False)
+    tc = _app(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes.orch_client, "health", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    r = tc.get("/v1/readyz")
+    assert r.status_code == 503
+    checks = r.json()["checks"]
+    assert checks["orchestrator"] is False
