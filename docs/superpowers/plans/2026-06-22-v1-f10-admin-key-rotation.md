@@ -295,19 +295,18 @@ git commit -m "feat(v1): gated admin keys/info diagnostics endpoint (F10)"
 
 - [ ] **Step 1: Inspect the existing F9 test** — `cd /root/all_project_models/alfaj/text-to-cad-product && sed -n '1,80p' tests/test_v1_f9_salt.py` to see how it sets env + asserts the boot guard.
 
-- [ ] **Step 2: Add a failing test** — append to `tests/test_v1_f9_salt.py` a case proving the guard fires when only `ADMIN_API_KEYS` is set with the default salt (mirror the existing legacy-key case's structure — env setup + reload `app.main` + assert `RuntimeError`):
+- [ ] **Step 2: Add a failing test** — the existing tests fire the guard via the **lifespan** (`with TestClient(m.app):` raises on startup), NOT via `importlib.reload`. Match that exactly. The file already has a `_reload(monkeypatch)`-style helper that sets env + reloads `app.core.config` then `app.main` (see lines 13-14: `importlib.reload(c)`; `importlib.reload(m)`) and returns `m`. Append a case mirroring `test_default_salt_with_admin_refuses_boot` (line 17) but setting `ADMIN_API_KEYS` instead of `ADMIN_API_KEY`:
 ```python
-def test_f9_guard_fires_on_admin_api_keys_default_salt(monkeypatch):
-    import importlib
+def test_default_salt_with_admin_keys_refuses_boot(tmp_path, monkeypatch):
     monkeypatch.setenv("API_KEY_SALT", "dev-salt-change-me")
     monkeypatch.setenv("ADMIN_API_KEY", "")
     monkeypatch.setenv("ADMIN_API_KEYS", "k1,k2")
-    import app.core.config as c2; importlib.reload(c2)
-    import app.main as m
-    with pytest.raises(RuntimeError):
-        importlib.reload(m)          # lifespan guard is module/lifespan level
+    m = _reload(monkeypatch)          # use the file's existing reload helper
+    with pytest.raises(Exception):
+        with TestClient(m.app):       # lifespan startup raises
+            pass
 ```
-(If the existing tests assert the guard via the lifespan `TestClient` context rather than reload, match that mechanism instead — keep this new case consistent with the file's existing pattern. `pytest` + `importlib` imports as the file already uses them.)
+Use the file's actual helper name/signature as written (adapt the env-setting style to match — some cases use `monkeypatch.setenv`, the helper does the reload). Do NOT assert via `importlib.reload(m)` raising — the guard is in the lifespan, not at import.
 
 - [ ] **Step 3: Run, verify fail** — `cd /root/all_project_models/alfaj/text-to-cad-product && /root/anaconda3/envs/cadskills/bin/python -m pytest tests/test_v1_f9_salt.py -v`
 Expected: the new case FAILS (current guard checks only `config.ADMIN_API_KEY`).
