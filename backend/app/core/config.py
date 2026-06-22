@@ -75,3 +75,6 @@ JOB_WALLCLOCK_TIMEOUT = int(os.environ.get("JOB_WALLCLOCK_TIMEOUT", "5400"))
 V1_CORS_ORIGINS = [o for o in os.environ.get("V1_CORS_ORIGINS", "").split(",") if o]
 API_MIN_DISK_MB = int(os.environ.get("API_MIN_DISK_MB", "500"))
 API_READYZ_CACHE_S = int(os.environ.get("API_READYZ_CACHE_S", "15"))
+API_QUOTA_ENABLED = _flag("API_QUOTA_ENABLED", "1")
+API_DEFAULT_DAILY_JOB_LIMIT = int(os.environ.get("API_DEFAULT_DAILY_JOB_LIMIT", "50"))
+API_DEFAULT_MAX_IN_FLIGHT = int(os.environ.get("API_DEFAULT_MAX_IN_FLIGHT", "3"))

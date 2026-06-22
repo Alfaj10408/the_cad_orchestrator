@@ -37,6 +37,8 @@ def init_db(conn: sqlite3.Connection) -> None:
       job_id TEXT PRIMARY KEY, user_id TEXT, project_id TEXT, status TEXT, stage TEXT,
       failure_class TEXT, created_at TEXT, started_at TEXT, completed_at TEXT,
       queue_pos INTEGER, metrics_json TEXT);
+    CREATE TABLE IF NOT EXISTS user_quota(
+      user_id TEXT PRIMARY KEY, daily_job_limit INTEGER, max_in_flight INTEGER);
     """)
     conn.commit()
 
@@ -92,3 +94,31 @@ def pending_position(conn, job_id):
         "SELECT COUNT(*) AS c FROM jobs WHERE status='pending' "
         "AND (created_at < ? OR (created_at = ? AND job_id <= ?))",
         (row["created_at"], row["created_at"], job_id)).fetchone()["c"]
+
+def count_in_flight(conn, user_id):
+    return conn.execute(
+        "SELECT COUNT(*) AS c FROM jobs WHERE user_id=? AND status IN ('pending','running')",
+        (user_id,)).fetchone()["c"]
+
+def count_created_since(conn, user_id, since_iso):
+    return conn.execute(
+        "SELECT COUNT(*) AS c FROM jobs WHERE user_id=? AND created_at >= ?",
+        (user_id, since_iso)).fetchone()["c"]
+
+def get_quota(conn, user_id):
+    row = conn.execute(
+        "SELECT daily_job_limit, max_in_flight FROM user_quota WHERE user_id=?",
+        (user_id,)).fetchone()
+    daily = row["daily_job_limit"] if row and row["daily_job_limit"] is not None else config.API_DEFAULT_DAILY_JOB_LIMIT
+    inflight = row["max_in_flight"] if row and row["max_in_flight"] is not None else config.API_DEFAULT_MAX_IN_FLIGHT
+    return daily, inflight
+
+def set_quota(conn, user_id, daily_job_limit, max_in_flight):
+    conn.execute(
+        "INSERT INTO user_quota(user_id, daily_job_limit, max_in_flight) VALUES(?,?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET daily_job_limit=excluded.daily_job_limit, "
+        "max_in_flight=excluded.max_in_flight",
+        (user_id, daily_job_limit, max_in_flight)); conn.commit()
+
+def clear_quota(conn, user_id):
+    conn.execute("DELETE FROM user_quota WHERE user_id=?", (user_id,)); conn.commit()
