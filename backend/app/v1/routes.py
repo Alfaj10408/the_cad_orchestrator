@@ -67,7 +67,13 @@ def whoami(user_id: str = Depends(auth.require_user), conn=Depends(db.get_conn))
     u = db.get_user(conn, user_id)
     if u is None:
         raise HTTPException(status_code=404, detail="user not found")
-    return {"user_id": user_id, "name": u["name"], "is_admin": bool(u["is_admin"])}
+    daily_limit, max_in_flight = db.get_quota(conn, user_id)
+    since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    return {"user_id": user_id, "name": u["name"], "is_admin": bool(u["is_admin"]),
+            "quota": {"daily_job_limit": daily_limit,
+                      "daily_used": db.count_created_since(conn, user_id, since),
+                      "max_in_flight": max_in_flight,
+                      "in_flight": db.count_in_flight(conn, user_id)}}
 
 @router.get("/jobs/{job_id}", response_model=JobView)
 def get_job(job_id: str, user_id: str = Depends(auth.require_user),
@@ -196,6 +202,10 @@ def readyz(request: Request):
 class _KeyReq(BaseModel):
     user_name: str
 
+class _QuotaReq(BaseModel):
+    daily_job_limit: int | None = None
+    max_in_flight: int | None = None
+
 @router.post("/admin/keys", status_code=201)
 def admin_mint_key(body: _KeyReq, _: bool = Depends(auth.require_admin),
                    conn=Depends(db.get_conn)):
@@ -207,3 +217,16 @@ def admin_revoke_key(key_id: str, _: bool = Depends(auth.require_admin),
                      conn=Depends(db.get_conn)):
     db.revoke_key(conn, key_id)
     return {"revoked": key_id}
+
+@router.post("/admin/users/{target_user_id}/quota")
+def admin_set_quota(target_user_id: str, body: _QuotaReq,
+                    _: bool = Depends(auth.require_admin), conn=Depends(db.get_conn)):
+    db.set_quota(conn, target_user_id, body.daily_job_limit, body.max_in_flight)
+    return {"user_id": target_user_id, "daily_job_limit": body.daily_job_limit,
+            "max_in_flight": body.max_in_flight}
+
+@router.delete("/admin/users/{target_user_id}/quota")
+def admin_clear_quota(target_user_id: str,
+                      _: bool = Depends(auth.require_admin), conn=Depends(db.get_conn)):
+    db.clear_quota(conn, target_user_id)
+    return {"cleared": target_user_id}
