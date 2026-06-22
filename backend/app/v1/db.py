@@ -1,11 +1,19 @@
 """SQLite index for the /v1 API (users, api_keys, jobs). WAL; stdlib sqlite3."""
 from __future__ import annotations
 import sqlite3, uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from app.core import config
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+def _add_column_if_missing(conn, table: str, name: str, decl: str) -> None:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if name not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 def connect(path: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path or config.API_DB_PATH, check_same_thread=False)
@@ -40,6 +48,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS user_quota(
       user_id TEXT PRIMARY KEY, daily_job_limit INTEGER, max_in_flight INTEGER);
     """)
+    _add_column_if_missing(conn, "jobs", "claimed_by", "TEXT")
+    _add_column_if_missing(conn, "jobs", "claimed_at", "TEXT")
+    _add_column_if_missing(conn, "jobs", "lease_expires_at", "TEXT")
     conn.commit()
 
 def create_user(conn, name, is_admin=False) -> str:
@@ -82,6 +93,47 @@ def list_pending_jobs(conn):
 
 def list_running_jobs(conn):
     return conn.execute("SELECT * FROM jobs WHERE status='running'").fetchall()
+
+def next_pending(conn):
+    return conn.execute(
+        "SELECT * FROM jobs WHERE status='pending' "
+        "ORDER BY created_at, job_id LIMIT 1").fetchone()
+
+def count_pending(conn) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS c FROM jobs WHERE status='pending'").fetchone()["c"]
+
+def claim_job(conn, job_id, worker_id, *, lease_s, now=None) -> bool:
+    n = now or _utc_now()
+    started = n.isoformat()
+    lease = (n + timedelta(seconds=lease_s)).isoformat()
+    cur = conn.execute(
+        "UPDATE jobs SET status='running', started_at=?, claimed_by=?, "
+        "claimed_at=?, lease_expires_at=? WHERE job_id=? AND status='pending'",
+        (started, worker_id, started, lease, job_id))
+    conn.commit()
+    return cur.rowcount == 1
+
+def renew_lease(conn, job_id, worker_id, *, lease_s, now=None) -> bool:
+    n = now or _utc_now()
+    lease = (n + timedelta(seconds=lease_s)).isoformat()
+    cur = conn.execute(
+        "UPDATE jobs SET lease_expires_at=? WHERE job_id=? AND claimed_by=? "
+        "AND status='running'", (lease, job_id, worker_id))
+    conn.commit()
+    return cur.rowcount == 1
+
+def reclaim_expired(conn, *, now=None) -> int:
+    """Expired (or NULL-lease) running jobs -> pending, claim fields cleared.
+    Lease expiry makes a job reclaimable; it never fails the job. Returns count."""
+    n = (now or _utc_now()).isoformat()
+    cur = conn.execute(
+        "UPDATE jobs SET status='pending', claimed_by=NULL, claimed_at=NULL, "
+        "lease_expires_at=NULL "
+        "WHERE status='running' AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+        (n,))
+    conn.commit()
+    return cur.rowcount
 
 def pending_position(conn, job_id):
     """1-based rank of job_id among status='pending' rows by (created_at, job_id);
