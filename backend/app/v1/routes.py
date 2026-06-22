@@ -1,6 +1,7 @@
 """/v1 production API facade. Wraps existing pipeline services."""
 from __future__ import annotations
 import json, uuid
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -77,15 +78,18 @@ def list_artifacts(job_id: str, request: Request, user_id: str = Depends(auth.re
     return {"artifacts": [{"name": a.name, "category": a.category,
                            "relative_path": a.relative_path} for a in arts]}
 
-@router.get("/jobs/{job_id}/artifacts/{name}")
-def download_artifact(job_id: str, name: str, request: Request,
+@router.get("/jobs/{job_id}/artifacts/{rel:path}")
+def download_artifact(job_id: str, rel: str, request: Request,
                       user_id: str = Depends(auth.require_user)):
     r = _owned_row(request, job_id, user_id)
     root = paths.project_dir(r["project_id"]).resolve()
-    target = (root / "cad" / name).resolve()
+    rel_path = Path(rel)
+    if rel_path.is_absolute() or ".." in rel_path.parts:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    target = (root / rel_path).resolve()
     if root not in target.parents or not target.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
-    return FileResponse(str(target), filename=name)
+    return FileResponse(str(target), filename=target.name)
 
 @router.get("/jobs/{job_id}/events")
 async def stream_events(job_id: str, request: Request,
