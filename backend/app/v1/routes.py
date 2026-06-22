@@ -1,12 +1,13 @@
 """/v1 production API facade. Wraps existing pipeline services."""
 from __future__ import annotations
 import json, uuid
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from app.core import config, paths
 from app.services import job_service, artifact_service, claude_code_adapter
 from app.v1 import auth, db
 from app.v1.models import JobCreate, JobView
+from app.api.events import _gen
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 _ALLOWED_MODES = {"qwen_claude_code", "deterministic"}
@@ -84,3 +85,36 @@ def download_artifact(job_id: str, name: str, request: Request,
     if root not in target.parents or not target.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
     return FileResponse(str(target), filename=name)
+
+@router.get("/jobs/{job_id}/events")
+async def stream_events(job_id: str, request: Request,
+                        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+                        user_id: str = Depends(auth.require_user)) -> StreamingResponse:
+    r = _owned_row(request, job_id, user_id)
+    try: last_id = int(last_event_id) if last_event_id else 0
+    except ValueError: last_id = 0
+    return StreamingResponse(_gen(r["project_id"], job_id, last_id, request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"})
+
+@router.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+@router.get("/readyz")
+def readyz(request: Request):
+    checks = {}
+    try:
+        request.app.state.db.execute("SELECT 1")
+        checks["db"] = True
+    except Exception:
+        checks["db"] = False
+    try:
+        checks["claude_code"] = bool(claude_code_adapter.health().get("authenticated"))
+    except Exception:
+        checks["claude_code"] = False
+    q = request.app.state.queue
+    checks["worker"] = bool(getattr(q, "alive", lambda: True)())
+    ready = all(checks.values())
+    return {"ready": ready, "checks": checks}

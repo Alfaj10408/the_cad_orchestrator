@@ -37,6 +37,9 @@ class JobQueue:
     def depth(self) -> int:
         return self._q.qsize()
 
+    def alive(self):
+        return self._task is not None and not self._task.done()
+
     def enqueue(self, job_id: str) -> int:
         if self._q.qsize() >= config.API_MAX_QUEUE_DEPTH:
             raise RuntimeError("queue full")
