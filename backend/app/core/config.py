@@ -78,3 +78,11 @@ API_READYZ_CACHE_S = int(os.environ.get("API_READYZ_CACHE_S", "15"))
 API_QUOTA_ENABLED = _flag("API_QUOTA_ENABLED", "1")
 API_DEFAULT_DAILY_JOB_LIMIT = int(os.environ.get("API_DEFAULT_DAILY_JOB_LIMIT", "50"))
 API_DEFAULT_MAX_IN_FLIGHT = int(os.environ.get("API_DEFAULT_MAX_IN_FLIGHT", "3"))
+
+# --- /v1 rate limiting (P2) ---
+API_RATE_LIMIT_ENABLED = _flag("API_RATE_LIMIT_ENABLED", "1")
+API_RATE_SUBMIT_PER_MIN = int(os.environ.get("API_RATE_SUBMIT_PER_MIN", "10"))
+API_RATE_READ_PER_MIN = int(os.environ.get("API_RATE_READ_PER_MIN", "120"))
+API_RATE_SSE_PER_MIN = int(os.environ.get("API_RATE_SSE_PER_MIN", "30"))
+API_RATE_ADMIN_PER_MIN = int(os.environ.get("API_RATE_ADMIN_PER_MIN", "60"))
+API_RATE_MAX_BUCKETS = int(os.environ.get("API_RATE_MAX_BUCKETS", "10000"))
