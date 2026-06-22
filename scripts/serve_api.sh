@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-: "${ADMIN_API_KEY:?set ADMIN_API_KEY}"
+: "${ADMIN_API_KEY:=}"
+: "${ADMIN_API_KEYS:=}"
+if [ -z "$ADMIN_API_KEY" ] && [ -z "$ADMIN_API_KEYS" ]; then
+  echo "set ADMIN_API_KEY or ADMIN_API_KEYS" >&2; exit 1
+fi
 : "${API_KEY_SALT:?set API_KEY_SALT (non-default) for production}"
 export GENERATION_PROVIDER="${GENERATION_PROVIDER:-qwen_claude_code}"
 export CLAUDE_CODE_ENABLED="${CLAUDE_CODE_ENABLED:-1}"

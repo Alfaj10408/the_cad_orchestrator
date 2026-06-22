@@ -29,3 +29,10 @@ def test_dev_default_salt_no_admin_boots(tmp_path, monkeypatch):
     m = _load(monkeypatch, tmp_path, "dev-salt-change-me", None)
     with TestClient(m.app) as tc:
         assert tc.get("/v1/healthz").status_code == 200
+
+def test_default_salt_with_admin_keys_refuses_boot(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_API_KEYS", "k1,k2")
+    m = _load(monkeypatch, tmp_path, "dev-salt-change-me", "")
+    with pytest.raises(Exception):
+        with TestClient(m.app):   # lifespan startup raises
+            pass

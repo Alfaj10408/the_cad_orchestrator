@@ -27,9 +27,9 @@ from app.v1.queue import JobQueue
 
 @asynccontextmanager
 async def _lifespan(app):
-    if config.API_KEY_SALT == "dev-salt-change-me" and config.ADMIN_API_KEY:
+    if config.API_KEY_SALT == "dev-salt-change-me" and config.admin_key_set():
         raise RuntimeError(
-            "API_KEY_SALT is the default in a production deployment (ADMIN_API_KEY is set). "
+            "API_KEY_SALT is the default in a production deployment (admin key(s) set). "
             "Set a strong API_KEY_SALT.")
     c = v1db.connect(); v1db.init_db(c); c.close()
     if config.API_REAP_ORPHAN_CLAUDE:
