@@ -38,12 +38,12 @@ def create_job(body: JobCreate, request: Request, user_id: str = Depends(auth.re
     job = job_service.create_job_full(pid, "generation", "CREATED")
     db.insert_job(conn, job.job_id, user_id, pid, status="pending")
     try:
-        pos = request.app.state.queue.enqueue(job.job_id)
+        request.app.state.queue.enqueue(job.job_id)
     except RuntimeError:
         db.update_job(conn, job.job_id, status="failed", failure_class="internal")
         raise HTTPException(status_code=429, detail="queue full")
-    db.update_job(conn, job.job_id, queue_pos=pos)
-    return {"job_id": job.job_id, "status": "pending", "queue_pos": pos}
+    return {"job_id": job.job_id, "status": "pending",
+            "queue_pos": db.pending_position(conn, job.job_id)}
 
 @router.get("/me")
 def whoami(user_id: str = Depends(auth.require_user), conn=Depends(db.get_conn)):
@@ -57,7 +57,8 @@ def get_job(job_id: str, user_id: str = Depends(auth.require_user),
             conn=Depends(db.get_conn)):
     r = _owned_row(conn, job_id, user_id)
     return JobView(job_id=r["job_id"], status=r["status"], stage=r["stage"],
-                   failure_class=r["failure_class"], queue_pos=r["queue_pos"],
+                   failure_class=r["failure_class"],
+                   queue_pos=db.pending_position(conn, job_id),
                    created_at=r["created_at"], started_at=r["started_at"],
                    completed_at=r["completed_at"])
 
