@@ -12,7 +12,19 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(f"PRAGMA busy_timeout={config.API_DB_BUSY_TIMEOUT_MS}")
     return conn
+
+def get_conn():
+    """FastAPI dependency: a fresh per-request connection, closed at teardown."""
+    conn = connect()
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript("""

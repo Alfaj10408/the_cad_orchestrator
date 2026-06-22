@@ -67,6 +67,7 @@ CLAUDE_CODE_MAX_REPAIRS = int(os.environ.get("CLAUDE_CODE_MAX_REPAIRS", "2"))
 
 # ---------- /v1 production API ----------
 API_DB_PATH = os.environ.get("API_DB_PATH", str(STORAGE_ROOT / "api.db"))
+API_DB_BUSY_TIMEOUT_MS = int(os.environ.get("API_DB_BUSY_TIMEOUT_MS", "5000"))
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
 API_KEY_SALT = os.environ.get("API_KEY_SALT", "dev-salt-change-me")
 API_MAX_QUEUE_DEPTH = int(os.environ.get("API_MAX_QUEUE_DEPTH", "32"))
