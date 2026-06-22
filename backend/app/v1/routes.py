@@ -14,17 +14,15 @@ from app.api.events import _gen
 router = APIRouter(prefix="/v1", tags=["v1"])
 _ALLOWED_MODES = {"qwen_claude_code", "deterministic"}
 
-def _conn(request: Request):
-    return request.app.state.db
-
-def _owned_row(request, job_id, user_id):
-    row = db.get_job_row(_conn(request), job_id)
+def _owned_row(conn, job_id, user_id):
+    row = db.get_job_row(conn, job_id)
     if row is None or row["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="job not found")
     return row
 
 @router.post("/jobs", status_code=201)
-def create_job(body: JobCreate, request: Request, user_id: str = Depends(auth.require_user)):
+def create_job(body: JobCreate, request: Request, user_id: str = Depends(auth.require_user),
+               conn=Depends(db.get_conn)):
     if body.mode not in _ALLOWED_MODES:
         raise HTTPException(status_code=422, detail="invalid mode")
     if len(body.prompt) > config.CLAUDE_CODE_MAX_PROMPT_CHARS:
@@ -38,50 +36,53 @@ def create_job(body: JobCreate, request: Request, user_id: str = Depends(auth.re
         "user_answers": {"dimensions": body.dimensions or ""},
         "ready_to_generate": True, "generation_mode": body.mode}))
     job = job_service.create_job_full(pid, "generation", "CREATED")
-    db.insert_job(_conn(request), job.job_id, user_id, pid, status="pending")
+    db.insert_job(conn, job.job_id, user_id, pid, status="pending")
     try:
         pos = request.app.state.queue.enqueue(job.job_id)
     except RuntimeError:
-        db.update_job(_conn(request), job.job_id, status="failed", failure_class="internal")
+        db.update_job(conn, job.job_id, status="failed", failure_class="internal")
         raise HTTPException(status_code=429, detail="queue full")
-    db.update_job(_conn(request), job.job_id, queue_pos=pos)
+    db.update_job(conn, job.job_id, queue_pos=pos)
     return {"job_id": job.job_id, "status": "pending", "queue_pos": pos}
 
 @router.get("/me")
-def whoami(request: Request, user_id: str = Depends(auth.require_user)):
-    u = db.get_user(_conn(request), user_id)
+def whoami(user_id: str = Depends(auth.require_user), conn=Depends(db.get_conn)):
+    u = db.get_user(conn, user_id)
     if u is None:
         raise HTTPException(status_code=404, detail="user not found")
     return {"user_id": user_id, "name": u["name"], "is_admin": bool(u["is_admin"])}
 
 @router.get("/jobs/{job_id}", response_model=JobView)
-def get_job(job_id: str, request: Request, user_id: str = Depends(auth.require_user)):
-    r = _owned_row(request, job_id, user_id)
+def get_job(job_id: str, user_id: str = Depends(auth.require_user),
+            conn=Depends(db.get_conn)):
+    r = _owned_row(conn, job_id, user_id)
     return JobView(job_id=r["job_id"], status=r["status"], stage=r["stage"],
                    failure_class=r["failure_class"], queue_pos=r["queue_pos"],
                    created_at=r["created_at"], started_at=r["started_at"],
                    completed_at=r["completed_at"])
 
 @router.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: str, request: Request, user_id: str = Depends(auth.require_user)):
-    r = _owned_row(request, job_id, user_id)
+def cancel_job(job_id: str, user_id: str = Depends(auth.require_user),
+               conn=Depends(db.get_conn)):
+    r = _owned_row(conn, job_id, user_id)
     killed = claude_code_adapter.cancel(job_id)
     if r["status"] in ("pending", "running"):
-        db.update_job(_conn(request), job_id, status="cancelled")
+        db.update_job(conn, job_id, status="cancelled")
     return {"job_id": job_id, "requested": True, "killed_process": killed}
 
 @router.get("/jobs/{job_id}/artifacts")
-def list_artifacts(job_id: str, request: Request, user_id: str = Depends(auth.require_user)):
-    r = _owned_row(request, job_id, user_id)
+def list_artifacts(job_id: str, user_id: str = Depends(auth.require_user),
+                   conn=Depends(db.get_conn)):
+    r = _owned_row(conn, job_id, user_id)
     listing = artifact_service.list_artifacts(r["project_id"])
     arts = listing.artifacts if listing else []
     return {"artifacts": [{"name": a.name, "category": a.category,
                            "relative_path": a.relative_path} for a in arts]}
 
 @router.get("/jobs/{job_id}/artifacts/{rel:path}")
-def download_artifact(job_id: str, rel: str, request: Request,
-                      user_id: str = Depends(auth.require_user)):
-    r = _owned_row(request, job_id, user_id)
+def download_artifact(job_id: str, rel: str, user_id: str = Depends(auth.require_user),
+                      conn=Depends(db.get_conn)):
+    r = _owned_row(conn, job_id, user_id)
     root = paths.project_dir(r["project_id"]).resolve()
     rel_path = Path(rel)
     if rel_path.is_absolute() or ".." in rel_path.parts:
@@ -94,8 +95,9 @@ def download_artifact(job_id: str, rel: str, request: Request,
 @router.get("/jobs/{job_id}/events")
 async def stream_events(job_id: str, request: Request,
                         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-                        user_id: str = Depends(auth.require_user)) -> StreamingResponse:
-    r = _owned_row(request, job_id, user_id)
+                        user_id: str = Depends(auth.require_user),
+                        conn=Depends(db.get_conn)) -> StreamingResponse:
+    r = _owned_row(conn, job_id, user_id)
     try: last_id = int(last_event_id) if last_event_id else 0
     except ValueError: last_id = 0
     return StreamingResponse(_gen(r["project_id"], job_id, last_id, request),
@@ -111,7 +113,7 @@ def healthz():
 def readyz(request: Request):
     checks = {}
     try:
-        request.app.state.db.execute("SELECT 1")
+        c = db.connect(); c.execute("SELECT 1"); c.close()
         checks["db"] = True
     except Exception:
         checks["db"] = False
@@ -128,11 +130,13 @@ class _KeyReq(BaseModel):
     user_name: str
 
 @router.post("/admin/keys", status_code=201)
-def admin_mint_key(body: _KeyReq, request: Request, _: bool = Depends(auth.require_admin)):
-    key, prefix, kid, uid = auth.mint_key(_conn(request), body.user_name)
+def admin_mint_key(body: _KeyReq, _: bool = Depends(auth.require_admin),
+                   conn=Depends(db.get_conn)):
+    key, prefix, kid, uid = auth.mint_key(conn, body.user_name)
     return {"key": key, "key_prefix": prefix, "key_id": kid, "user_id": uid}
 
 @router.delete("/admin/keys/{key_id}")
-def admin_revoke_key(key_id: str, request: Request, _: bool = Depends(auth.require_admin)):
-    db.revoke_key(_conn(request), key_id)
+def admin_revoke_key(key_id: str, _: bool = Depends(auth.require_admin),
+                     conn=Depends(db.get_conn)):
+    db.revoke_key(conn, key_id)
     return {"revoked": key_id}

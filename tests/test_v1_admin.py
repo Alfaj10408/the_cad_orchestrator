@@ -5,11 +5,18 @@ if str(_BACKEND) not in sys.path: sys.path.insert(0, str(_BACKEND))
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from app.v1 import db, auth, routes
+from app.core import config as _config
 
 def test_admin_mint_key(tmp_path, monkeypatch):
     monkeypatch.setattr(auth.config, "ADMIN_API_KEY", "admin-secret")
-    app = FastAPI(); conn = db.connect(str(tmp_path/"ad.db")); db.init_db(conn)
-    app.state.db = conn; app.state.queue = type("Q",(),{"enqueue":lambda s,j:1,"depth":lambda s:0})()
+    db_path = str(tmp_path / "ad.db")
+    monkeypatch.setattr(_config, "API_DB_PATH", db_path)
+    import app.v1.db as _db_mod
+    monkeypatch.setattr(_db_mod.config, "API_DB_PATH", db_path)
+    init_conn = db.connect(db_path); db.init_db(init_conn); init_conn.close()
+
+    app = FastAPI()
+    app.state.queue = type("Q",(),{"enqueue":lambda s,j:1,"depth":lambda s:0})()
     app.include_router(routes.router)
     c = TestClient(app)
     assert c.post("/v1/admin/keys", json={"user_name":"x"}).status_code == 403  # no admin
