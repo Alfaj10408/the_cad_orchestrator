@@ -29,6 +29,21 @@ def create_job(body: JobCreate, request: Request, user_id: str = Depends(auth.re
         raise HTTPException(status_code=422, detail="invalid mode")
     if len(body.prompt) > config.CLAUDE_CODE_MAX_PROMPT_CHARS:
         raise HTTPException(status_code=422, detail="prompt too long")
+    if config.API_QUOTA_ENABLED:
+        u = db.get_user(conn, user_id)
+        if not (u and u["is_admin"]):
+            daily_limit, max_in_flight = db.get_quota(conn, user_id)
+            if db.count_in_flight(conn, user_id) >= max_in_flight:
+                raise HTTPException(status_code=429, detail={
+                    "detail": "max in-flight jobs reached", "scope": "in_flight",
+                    "limit": max_in_flight, "used": db.count_in_flight(conn, user_id)})
+            since = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0).isoformat()
+            used = db.count_created_since(conn, user_id, since)
+            if used >= daily_limit:
+                raise HTTPException(status_code=429, detail={
+                    "detail": "daily job limit reached", "scope": "daily",
+                    "limit": daily_limit, "used": used})
     pid = uuid.uuid4().hex
     paths.ensure_project_skeleton(pid)
     (paths.project_dir(pid) / "brief.json").write_text(json.dumps({
