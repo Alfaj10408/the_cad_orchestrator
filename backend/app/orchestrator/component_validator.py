@@ -70,6 +70,16 @@ def _repair_hint(reason: str) -> str:
         return ("\nHINT: the fillet radius is too large for this geometry. Substantially "
                 "reduce it, use max_fillet() to compute a safe radius, or remove the fillet "
                 "on those edges.\n")
+    if (("chamfer" in r or "fillet" in r) and
+            ("edge" in r or "no faces" in r or "brep" in r or "standard_" in r
+             or "null" in r or "not found" in r)):
+        return ("\nHINT: this fillet/chamfer targets edges that no longer exist or are "
+                "curved (often because a prior global fillet already rounded them). "
+                "Fixes, in order: (1) wrap the cosmetic op in try/except and keep the "
+                "base solid on failure; (2) if fillet and chamfer share edges, do the "
+                "chamfer before the fillet; (3) select a narrow, specific edge set and "
+                "chamfer only straight edges (.filter_by(GeomType.LINE)); (4) if still "
+                "failing, remove the cosmetic op — the component is valid without it.\n")
     if "chamfer" in r:
         return "\nHINT: the chamfer length is too large. Reduce it or remove the chamfer.\n"
     if ("not defined" in r or "nameerror" in r or "attributeerror" in r
