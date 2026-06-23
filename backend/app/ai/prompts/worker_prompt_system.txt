@@ -31,6 +31,8 @@ Output a concise plain-text spec the engineer can implement directly, covering:
 - A NUMBERED list of >=8 named features/components with sizes and positions
   (origin at part center, XY base plane, +Z up).
 - Geometry approach: primitives + boolean ops + fillets/chamfers per feature.
+  Treat fillets/chamfers as cosmetic: never call for both on the same edge, and
+  keep them small and local.
 - Manufacturability constraints and the quality bar (recognizable, not a box).
 
 Plain text only. No code, no build123d, no markdown fences. ~300 words max.
