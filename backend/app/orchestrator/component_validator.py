@@ -35,7 +35,27 @@ Requirements:
 - Named parameters in millimeters near the top.
 - Origin at the component's own center, XY base plane, +Z up.
 - Approximate target envelope: {bb['x']} x {bb['y']} x {bb['z']} mm (a guide, not exact).
-- Closed, positive-volume solid; manufacturable; fillets/chamfers where natural.
+- Closed, positive-volume solid; manufacturable.
+- Fillets and chamfers are COSMETIC: the component MUST be a valid closed
+  positive-volume solid WITHOUT any fillet/chamfer. Add them only as a finishing
+  touch, following these rules:
+  * Never apply fillet() and chamfer() to the SAME edge or overlapping edge sets.
+  * If both are needed on nearby edges, do CHAMFER BEFORE FILLET (chamfer needs
+    the original straight edge; fillet the remaining straight edges after).
+  * Select a NARROW, specific edge set for each cosmetic op — never the global
+    part.edges(); use e.g. .edges().filter_by(Axis.Z) or one face's edges.
+  * Chamfer only STRAIGHT edges: .edges().filter_by(GeomType.LINE). Never chamfer
+    curved or already-filleted edges.
+  * Keep radius/length small relative to the local wall; prefer max_fillet().
+  * Build the valid solid FIRST, then wrap EACH cosmetic fillet/chamfer in its own
+    try/except; on ANY exception keep the pre-cosmetic solid and continue, e.g.:
+        base = part
+        try:
+            part = fillet(part.edges().filter_by(Axis.Z), radius=r)
+        except Exception:
+            part = base   # cosmetic failed -> keep the valid base solid
+    gen_step() MUST always return a valid positive-volume solid even if every
+    cosmetic op fails.
 - No file/network I/O; no os/subprocess/socket/shutil/pathlib/requests,
   no open()/eval()/exec()/__import__.
 
