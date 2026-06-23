@@ -1,6 +1,8 @@
 """In-process FIFO job queue with a single worker. Wraps claude_generation.run."""
 from __future__ import annotations
 import asyncio, json
+import logging
+_log = logging.getLogger("app.v1.queue")
 from datetime import datetime, timezone
 from app.core import config
 from app.services import claude_generation, job_service
@@ -76,7 +78,8 @@ class JobQueue:
         conn = db.connect(self.db_path)
         try:
             if self.mode == "claim":
-                db.reclaim_expired(conn)
+                n = db.reclaim_expired(conn)
+                _log.info("reclaim worker=%s count=%d", self.worker_id, n)
             else:
                 for r in db.list_running_jobs(conn):
                     _terminal(conn, r["job_id"], r["project_id"], "failed",
@@ -118,6 +121,7 @@ class JobQueue:
                 await asyncio.sleep(config.API_WORKER_HEARTBEAT_S)
                 db.renew_lease(self._conn, job_id, self.worker_id,
                                lease_s=config.API_WORKER_LEASE_S)
+                _log.info("renew worker=%s job=%s", self.worker_id, job_id)
         except asyncio.CancelledError:
             pass
 
@@ -131,6 +135,7 @@ class JobQueue:
             if not db.claim_job(self._conn, job_id, self.worker_id,
                                 lease_s=config.API_WORKER_LEASE_S):
                 continue                    # another worker won; poll again
+            _log.info("claim worker=%s job=%s", self.worker_id, job_id)
             hb = asyncio.create_task(self._heartbeat(job_id))
             try:
                 await asyncio.wait_for(
